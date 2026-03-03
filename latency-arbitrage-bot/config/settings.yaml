@@ -1,0 +1,163 @@
+# ============================================================
+# LATENCY ARBITRAGE BOT - Master Configuration
+# ============================================================
+# Copy this to settings.local.yaml and fill in your API keys
+# NEVER commit settings.local.yaml to git
+# ============================================================
+
+bot:
+  name: "spike-arb"
+  mode: "paper"  # paper | live
+  log_level: "INFO"
+  max_concurrent_trades: 5
+  check_interval_ms: 100  # How often to poll data sources (ms)
+
+# ============================================================
+# DATA SOURCES - Fast information feeds
+# ============================================================
+data_sources:
+  espn:
+    enabled: true
+    base_url: "https://site.api.espn.com/apis/site/v2/sports"
+    poll_interval_ms: 500
+    sports:
+      - football/nfl
+      - basketball/nba
+      - baseball/mlb
+      - hockey/nhl
+      - soccer/eng.1
+    websocket_url: null  # ESPN doesn't offer WS, we poll aggressively
+
+  weather:
+    enabled: true
+    providers:
+      nws:
+        base_url: "https://api.weather.gov"
+        poll_interval_ms: 30000  # NWS updates ~every 30s-60s
+      openweather:
+        base_url: "https://api.openweathermap.org/data/3.0"
+        api_key: "${OPENWEATHER_API_KEY}"
+        poll_interval_ms: 10000
+      weatherapi:
+        base_url: "https://api.weatherapi.com/v1"
+        api_key: "${WEATHERAPI_KEY}"
+        poll_interval_ms: 10000
+    # Track weather for cities relevant to prediction markets
+    tracked_locations:
+      - name: "New York"
+        lat: 40.7128
+        lon: -74.0060
+      - name: "Miami"
+        lat: 25.7617
+        lon: -80.1918
+      - name: "Los Angeles"
+        lat: 34.0522
+        lon: -118.2437
+      - name: "Chicago"
+        lat: 41.8781
+        lon: -87.6298
+
+  news:
+    enabled: true
+    providers:
+      newsapi:
+        base_url: "https://newsapi.org/v2"
+        api_key: "${NEWSAPI_KEY}"
+        poll_interval_ms: 5000
+      gdelt:
+        base_url: "https://api.gdeltproject.org/api/v2"
+        poll_interval_ms: 10000
+    tracked_keywords:
+      - "election"
+      - "hurricane"
+      - "earthquake"
+      - "fed rate"
+      - "supreme court"
+      - "championship"
+
+  crypto:
+    enabled: true
+    providers:
+      binance:
+        ws_url: "wss://stream.binance.com:9443/ws"
+        rest_url: "https://api.binance.com/api/v3"
+      coinbase:
+        ws_url: "wss://ws-feed.exchange.coinbase.com"
+        rest_url: "https://api.exchange.coinbase.com"
+    tracked_pairs:
+      - "BTCUSDT"
+      - "ETHUSDT"
+
+# ============================================================
+# PREDICTION MARKETS - Where we trade
+# ============================================================
+markets:
+  polymarket:
+    enabled: true
+    clob_url: "https://clob.polymarket.com"
+    gamma_url: "https://gamma-api.polymarket.com"
+    ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    chain_id: 137  # Polygon
+    private_key: "${POLYMARKET_PRIVATE_KEY}"
+    api_key: "${POLYMARKET_API_KEY}"
+    api_secret: "${POLYMARKET_API_SECRET}"
+    api_passphrase: "${POLYMARKET_API_PASSPHRASE}"
+    funder: "${POLYMARKET_FUNDER_ADDRESS}"
+    max_position_size_usd: 100
+    default_order_type: "limit"  # limit | market (GTC by default)
+
+  kalshi:
+    enabled: true
+    base_url: "https://trading-api.kalshi.com/trade-api/v2"
+    ws_url: "wss://trading-api.kalshi.com/trade-api/ws/v2"
+    email: "${KALSHI_EMAIL}"
+    password: "${KALSHI_PASSWORD}"
+    api_key: "${KALSHI_API_KEY}"
+    max_position_size_usd: 100
+    default_order_type: "limit"
+
+# ============================================================
+# STRATEGY CONFIGURATION
+# ============================================================
+strategy:
+  # Minimum edge required to trigger a trade (in probability points)
+  min_edge_threshold: 0.03  # 3% minimum edge
+
+  # Maximum time between data signal and trade execution
+  max_signal_age_ms: 5000
+
+  # Confidence thresholds
+  min_confidence: 0.65
+  high_confidence: 0.85
+
+  # Position sizing (Kelly Criterion fraction)
+  kelly_fraction: 0.25  # Quarter Kelly for safety
+  max_bet_size_usd: 50
+  min_bet_size_usd: 5
+
+  # Risk management
+  max_daily_loss_usd: 200
+  max_open_positions: 10
+  stop_loss_pct: 0.15  # Exit if position loses 15%
+
+  # Correlation tracking
+  track_data_source_latency: true
+  latency_window_size: 100  # Rolling window for latency stats
+
+# ============================================================
+# MONITORING
+# ============================================================
+monitoring:
+  enabled: true
+  dashboard_port: 8080
+  metrics_interval_s: 10
+  alert_on_loss_usd: 50
+  log_all_signals: true
+  trade_history_db: "data/trades.db"
+
+# ============================================================
+# DATABASE
+# ============================================================
+database:
+  path: "data/arb_bot.db"
+  backup_interval_hours: 6
