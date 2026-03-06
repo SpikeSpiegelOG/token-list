@@ -62,4 +62,4 @@ def test_order_book():
     )
     assert book.best_bid == 0.60
     assert book.best_ask == 0.65
-    assert book.spread == 0.05
+    assert abs(book.spread - 0.05) < 1e-10

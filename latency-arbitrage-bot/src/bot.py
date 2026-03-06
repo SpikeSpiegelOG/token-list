@@ -174,6 +174,9 @@ class SpikeArbBot:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.stop()))
 
+        # Start continuous market discovery in the background
+        discovery_task = asyncio.create_task(self._continuous_market_discovery())
+
         # Keep running
         try:
             while self._running:
@@ -181,6 +184,7 @@ class SpikeArbBot:
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
+            discovery_task.cancel()
             if self._running:
                 await self.stop()
 
@@ -284,12 +288,61 @@ class SpikeArbBot:
 
     async def _discover_markets(self) -> None:
         """Auto-discover active markets and register them with the mapper."""
+        total_discovered = 0
+
         for platform, connector in self.connectors.items():
             try:
+                # Use sport-specific discovery when available
+                if platform == Platform.POLYMARKET and hasattr(connector, "get_live_sports_markets"):
+                    markets = await connector.get_live_sports_markets()
+                    for market in markets:
+                        self.market_mapper.auto_map_from_question(market)
+                    total_discovered += len(markets)
+                    logger.info(f"Discovered {len(markets)} live sports markets on Polymarket")
+
+                if platform == Platform.KALSHI and hasattr(connector, "get_events_by_series"):
+                    from src.markets.kalshi.connector import KALSHI_SPORTS_SERIES
+                    for sport, series_list in KALSHI_SPORTS_SERIES.items():
+                        for series_ticker in series_list:
+                            try:
+                                events = await connector.get_events_by_series(series_ticker)
+                                for event in events:
+                                    event_ticker = event.get("event_ticker", "")
+                                    if event_ticker:
+                                        markets = await connector.get_markets_for_event(event_ticker)
+                                        for market in markets:
+                                            self.market_mapper.auto_map_from_question(market)
+                                        total_discovered += len(markets)
+                            except Exception:
+                                pass  # Series may not exist
+                    logger.info(f"Discovered {total_discovered} sports markets on Kalshi")
+
+                # Fallback: generic active markets
                 if hasattr(connector, "get_active_markets"):
                     markets = await connector.get_active_markets(limit=50)
                     for market in markets:
                         self.market_mapper.auto_map_from_question(market)
-                    logger.info(f"Discovered {len(markets)} markets on {platform.value}")
+                    total_discovered += len(markets)
+
             except Exception:
                 logger.exception(f"Error discovering markets on {platform.value}")
+
+        logger.info(f"Total markets discovered: {total_discovered} | Mapped: {self.market_mapper.registered_count}")
+
+    async def _continuous_market_discovery(self) -> None:
+        """Periodically re-discover markets to catch new games going live.
+
+        Runs every 60 seconds in the background while the bot is active.
+        """
+        discovery_interval = self.config.bot.__dict__.get("discovery_interval_s", 60)
+        while self._running:
+            try:
+                await asyncio.sleep(discovery_interval)
+                if not self._running:
+                    break
+                logger.debug("Running periodic market discovery...")
+                await self._discover_markets()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Error in continuous market discovery")

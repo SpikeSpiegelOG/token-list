@@ -1,22 +1,29 @@
 """Kalshi market connector.
 
-Kalshi is a CFTC-regulated exchange for event contracts. It offers REST and
-WebSocket APIs for trading. Key markets: weather, economics, politics.
+Kalshi is a CFTC-regulated exchange for event contracts. ~90% of volume is sports.
+It offers REST and WebSocket APIs for trading.
+
+Hierarchy: Series → Event → Market
+- Series: recurring template (e.g., "NFL Games")
+- Event: specific game (e.g., "Chiefs vs Eagles")
+- Market: specific question (e.g., "Will Chiefs win?", "Over 47.5?", "Chiefs -3.5?")
+
+Market types: Moneyline, Spread, Totals, Player Props, Same-Game Parlays
 
 Auth flow:
 1. Login with email/password to get auth token
 2. Use token for all subsequent requests
 3. Token expires, re-authenticate as needed
 
-Key endpoints:
-- /login: Authenticate
-- /markets: Browse/search markets
-- /portfolio/orders: Place and manage orders
-- /portfolio/positions: View positions
+IMPORTANT (March 2026): Legacy integer price fields are being removed.
+Use _dollars suffix fields (yes_bid_dollars, no_bid_dollars, etc.) instead.
+
+Fees: 0.07 × contracts × price × (1 - price)
 """
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -27,6 +34,7 @@ from src.core.event_bus import EventBus
 from src.core.models import (
     MarketSide,
     MarketState,
+    MarketType,
     Order,
     OrderBook,
     OrderBookLevel,
@@ -35,14 +43,32 @@ from src.core.models import (
     Platform,
 )
 
+# Known Kalshi sports series tickers for market discovery
+KALSHI_SPORTS_SERIES = {
+    "nfl": ["KXNFL", "KXNFLGAMES"],
+    "nba": ["KXNBA", "KXNBAGAMES"],
+    "mlb": ["KXMLB", "KXMLBGAMES"],
+    "nhl": ["KXNHL", "KXNHLGAMES"],
+    "ncaaf": ["KXNCAAF"],
+    "ncaab": ["KXNCAAB"],
+    "soccer": ["KXSOCCER"],
+    "mma": ["KXUFC"],
+}
+
+
+def calculate_kalshi_fee(contracts: int, price: float) -> float:
+    """Calculate Kalshi trading fee: 0.07 × C × P × (1 - P)."""
+    return 0.07 * contracts * price * (1.0 - price)
+
 
 class KalshiConnector(BaseMarketConnector):
-    """Full Kalshi API connector with order management."""
+    """Full Kalshi API connector with order management and sports discovery."""
 
     def __init__(self, event_bus: EventBus, config: dict[str, Any]) -> None:
         super().__init__("kalshi", event_bus, config)
-        self.base_url = config.get("base_url", "https://trading-api.kalshi.com/trade-api/v2")
-        self.ws_url = config.get("ws_url", "wss://trading-api.kalshi.com/trade-api/ws/v2")
+        # Updated base URL — api.elections.kalshi.com covers ALL markets
+        self.base_url = config.get("base_url", "https://api.elections.kalshi.com/trade-api/v2")
+        self.ws_url = config.get("ws_url", "wss://api.elections.kalshi.com/trade-api/ws/v2")
         self.email = config.get("email", "")
         self.password = config.get("password", "")
         self.api_key = config.get("api_key", "")
@@ -84,7 +110,6 @@ class KalshiConnector(BaseMarketConnector):
             data = await resp.json()
             self._auth_token = data.get("token", "")
             self._member_id = data.get("member_id", "")
-            # Token typically valid for 24 hours
             self._token_expiry = time.time() + 86400
             self.logger.info(f"Kalshi authenticated as member {self._member_id}")
 
@@ -124,6 +149,78 @@ class KalshiConnector(BaseMarketConnector):
                 return await resp.json()
         else:
             raise ValueError(f"Unsupported method: {method}")
+
+    # ---- Sports Discovery (Series → Event → Market) ----
+
+    async def get_sports_series(self, sport: str | None = None) -> list[dict[str, Any]]:
+        """Discover sports series tickers.
+
+        If sport is given (e.g., 'nfl'), returns known series for that sport.
+        Otherwise queries Kalshi for all series.
+        """
+        if sport and sport.lower() in KALSHI_SPORTS_SERIES:
+            tickers = KALSHI_SPORTS_SERIES[sport.lower()]
+            results = []
+            for ticker in tickers:
+                try:
+                    data = await self._request("GET", "/series", params={"series_ticker": ticker})
+                    series_list = data.get("series", [])
+                    results.extend(series_list)
+                except Exception:
+                    self.logger.debug(f"Series {ticker} not found or error")
+            return results
+        # Fallback: query events to discover series
+        try:
+            data = await self._request("GET", "/events", params={"status": "open", "limit": 100})
+            seen = set()
+            series = []
+            for event in data.get("events", []):
+                st = event.get("series_ticker", "")
+                if st and st not in seen:
+                    seen.add(st)
+                    series.append({"series_ticker": st, "title": event.get("title", "")})
+            return series
+        except Exception:
+            self.logger.exception("Error discovering sports series")
+            return []
+
+    async def get_events_by_series(self, series_ticker: str, status: str = "open") -> list[dict[str, Any]]:
+        """Get events (games) within a series.
+
+        For sports: each event is typically one game with multiple markets
+        (moneyline, spread, total, player props).
+        """
+        try:
+            data = await self._request("GET", "/events", params={
+                "series_ticker": series_ticker,
+                "status": status,
+                "limit": 100,
+            })
+            return data.get("events", [])
+        except Exception:
+            self.logger.exception(f"Error fetching events for series {series_ticker}")
+            return []
+
+    async def get_markets_for_event(self, event_ticker: str) -> list[MarketState]:
+        """Get all markets for a specific event (game).
+
+        Returns moneyline, spread, total, and player prop markets.
+        """
+        try:
+            data = await self._request("GET", "/markets", params={
+                "event_ticker": event_ticker,
+                "status": "open",
+                "limit": 100,
+            })
+            markets = []
+            for item in data.get("markets", []):
+                market = self._parse_market(item)
+                if market:
+                    markets.append(market)
+            return markets
+        except Exception:
+            self.logger.exception(f"Error fetching markets for event {event_ticker}")
+            return []
 
     # ---- Market Data ----
 
@@ -181,7 +278,7 @@ class KalshiConnector(BaseMarketConnector):
     async def get_events(self, series_ticker: str | None = None) -> list[dict[str, Any]]:
         """Get events (groups of related markets)."""
         try:
-            params = {}
+            params: dict[str, Any] = {}
             if series_ticker:
                 params["series_ticker"] = series_ticker
             data = await self._request("GET", "/events", params=params)
@@ -215,14 +312,15 @@ class KalshiConnector(BaseMarketConnector):
             size=int(size),  # Kalshi uses integer contract counts
         )
 
+        # Calculate expected fee
+        fee = calculate_kalshi_fee(int(size), price)
+        order.fees = fee
+
         try:
             kalshi_side = "yes" if side in (MarketSide.YES, MarketSide.BUY) else "no"
-            kalshi_action = "buy"  # We always buy yes or no contracts
+            kalshi_action = "buy"
 
-            # Price in cents (Kalshi uses cents, 1-99)
-            price_cents = int(price * 100)
-
-            order_payload = {
+            order_payload: dict[str, Any] = {
                 "ticker": market_id,
                 "action": kalshi_action,
                 "side": kalshi_side,
@@ -231,8 +329,11 @@ class KalshiConnector(BaseMarketConnector):
             }
 
             if order_type == OrderType.LIMIT:
-                order_payload["yes_price"] = price_cents if kalshi_side == "yes" else None
-                order_payload["no_price"] = price_cents if kalshi_side == "no" else None
+                # Use dollar-based pricing (not legacy cents)
+                if kalshi_side == "yes":
+                    order_payload["yes_price"] = price
+                else:
+                    order_payload["no_price"] = price
 
             if self._auth_token:
                 result = await self._request("POST", "/portfolio/orders", data=order_payload)
@@ -241,21 +342,23 @@ class KalshiConnector(BaseMarketConnector):
                 order.status = OrderStatus.SUBMITTED
                 order.submitted_at_ms = int(time.time() * 1000)
 
-                # Check if immediately filled
                 if order_data.get("status") == "filled":
                     order.status = OrderStatus.FILLED
                     order.fill_price = price
                     order.fill_size = size
                     order.filled_at_ms = int(time.time() * 1000)
 
-                self.logger.info(f"Order submitted: {order.platform_order_id} | {kalshi_action} {kalshi_side} {size}@{price}")
+                self.logger.info(
+                    f"Order submitted: {order.platform_order_id} | "
+                    f"{kalshi_action} {kalshi_side} {size}@{price} | fee: ${fee:.4f}"
+                )
             else:
                 # Paper trading
                 order.status = OrderStatus.FILLED
                 order.fill_price = price
                 order.fill_size = size
                 order.filled_at_ms = int(time.time() * 1000)
-                self.logger.info(f"[PAPER] Order filled: {kalshi_side} {size}@{price}")
+                self.logger.info(f"[PAPER] Order filled: {kalshi_side} {size}@{price} | fee: ${fee:.4f}")
 
         except Exception as e:
             order.status = OrderStatus.REJECTED
@@ -284,10 +387,12 @@ class KalshiConnector(BaseMarketConnector):
             return []
 
     async def get_balance(self) -> float:
-        """Get available balance."""
+        """Get available balance in dollars."""
         try:
             data = await self._request("GET", "/portfolio/balance")
-            # Kalshi returns balance in cents
+            # Prefer _dollars field; fall back to legacy cents field
+            if "balance_dollars" in data:
+                return float(data["balance_dollars"])
             return float(data.get("balance", 0)) / 100.0
         except Exception:
             self.logger.exception("Error fetching balance")
@@ -296,27 +401,83 @@ class KalshiConnector(BaseMarketConnector):
     # ---- Helpers ----
 
     def _parse_market(self, data: dict[str, Any]) -> MarketState:
-        yes_price = float(data.get("yes_bid", data.get("last_price", 50))) / 100.0
+        """Parse a Kalshi market response into MarketState.
+
+        Uses _dollars price fields (legacy integer cents removed March 12, 2026).
+        """
+        # Prefer dollar fields, fall back to cents-based
+        if "yes_bid_dollars" in data:
+            yes_price = float(data.get("yes_bid_dollars", data.get("last_price_dollars", 0.5)))
+        else:
+            yes_price = float(data.get("yes_bid", data.get("last_price", 50))) / 100.0
         no_price = 1.0 - yes_price
+
+        title = data.get("title", data.get("subtitle", ""))
+        market_type, spread_line, total_line = self._detect_market_type(title)
 
         return MarketState(
             platform=Platform.KALSHI,
             market_id=data.get("ticker", data.get("id", "")),
-            question=data.get("title", data.get("subtitle", "")),
+            question=title,
             yes_price=yes_price,
             no_price=no_price,
             volume_24h=float(data.get("volume_24h", data.get("volume", 0))),
             liquidity=float(data.get("open_interest", 0)),
+            market_type=market_type,
+            spread_line=spread_line,
+            total_line=total_line,
             metadata={
                 "ticker": data.get("ticker", ""),
                 "series_ticker": data.get("series_ticker", ""),
+                "event_ticker": data.get("event_ticker", ""),
                 "category": data.get("category", ""),
                 "close_time": data.get("close_time", ""),
                 "expiration_time": data.get("expiration_time", ""),
                 "settlement_value": data.get("settlement_value"),
                 "result": data.get("result", ""),
+                "estimated_fee_rate": 0.07,
             },
         )
+
+    @staticmethod
+    def _detect_market_type(title: str) -> tuple[MarketType, float | None, float | None]:
+        """Detect market type from Kalshi market title."""
+        t = title.lower()
+
+        # Spread: "Will X win by more than N?" or "X -N.5"
+        spread_match = re.search(
+            r'(?:win by (?:more than|over)|(?:spread|margin).*?)([\d]+\.?\d*)', t
+        )
+        if spread_match or "win by" in t or "spread" in t or "margin" in t:
+            line = float(spread_match.group(1)) if spread_match else None
+            return MarketType.SPREAD, line, None
+
+        # Total: "over N" or "total" or "combined"
+        total_match = re.search(
+            r'(?:over|under|total|combined).*?([\d]+\.?\d*)', t
+        )
+        if "total" in t or ("over" in t and any(c.isdigit() for c in t)):
+            line = float(total_match.group(1)) if total_match else None
+            return MarketType.TOTAL, None, line
+
+        # Player props
+        prop_keywords = [
+            "touchdown", "passing yards", "rushing yards", "receiving yards",
+            "points scored", "rebounds", "assists", "goals", "strikeouts",
+            "home runs", "tackles", "sacks", "interceptions",
+        ]
+        if any(kw in t for kw in prop_keywords):
+            return MarketType.PLAYER_PROP, None, None
+
+        # Moneyline: "Will X win?"
+        if any(kw in t for kw in ["win", "beat", "defeat"]):
+            return MarketType.MONEYLINE, None, None
+
+        # Futures
+        if any(kw in t for kw in ["championship", "mvp", "super bowl", "world series"]):
+            return MarketType.FUTURES, None, None
+
+        return MarketType.BINARY, None, None
 
     def _parse_order_book(self, data: dict[str, Any]) -> OrderBook:
         bids = []

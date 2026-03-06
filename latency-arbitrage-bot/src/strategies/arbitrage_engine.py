@@ -149,11 +149,12 @@ class ArbitrageEngine:
             logger.debug(f"Confidence too low ({confidence:.2f}) for market {market.market_id}")
             return
 
-        # Calculate position size
+        # Calculate position size (fee-aware per platform)
         suggested_size = self.position_sizer.calculate_size(
             edge=edge,
             confidence=confidence,
             current_price=target_price,
+            platform=market.platform,
         )
 
         if suggested_size <= 0:

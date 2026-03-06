@@ -32,6 +32,7 @@ from src.core.event_bus import EventBus
 from src.core.models import (
     MarketSide,
     MarketState,
+    MarketType,
     Order,
     OrderBook,
     OrderBookLevel,
@@ -129,6 +130,92 @@ class PolymarketConnector(BaseMarketConnector):
         async with self._session.get(url, params=params) as resp:
             resp.raise_for_status()
             return await resp.json()
+
+    # ---- Sports Discovery (Gamma API) ----
+
+    async def get_sports_metadata(self) -> list[dict[str, Any]]:
+        """Discover available sports with tag_ids and series_ids via Gamma /sports endpoint.
+
+        Returns sport objects with fields like:
+        - tag_id: for filtering events/markets by sport
+        - series_id: for filtering by league
+        - name, image, resolution_source, etc.
+        """
+        try:
+            result = await self._gamma_request("/sports")
+            if isinstance(result, list):
+                self.logger.info(f"Discovered {len(result)} sports on Polymarket")
+                return result
+            return []
+        except Exception:
+            self.logger.exception("Error fetching sports metadata")
+            return []
+
+    async def get_events_by_sport(
+        self,
+        tag_id: int | None = None,
+        series_id: int | None = None,
+        active: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Get events filtered by sport tag or series.
+
+        Use tag_id from /sports endpoint, or series_id for specific leagues.
+        The /events endpoint is the most efficient — events contain their markets.
+        """
+        params: dict[str, Any] = {
+            "active": str(active).lower(),
+            "closed": "false",
+            "limit": limit,
+            "offset": offset,
+        }
+        if tag_id is not None:
+            params["tag_id"] = tag_id
+        if series_id is not None:
+            params["series_id"] = series_id
+
+        try:
+            result = await self._gamma_request("/events", params=params)
+            return result if isinstance(result, list) else []
+        except Exception:
+            self.logger.exception(f"Error fetching events (tag_id={tag_id}, series_id={series_id})")
+            return []
+
+    async def get_live_sports_markets(self, tag_id: int | None = None) -> list[MarketState]:
+        """Get currently live/in-game sports markets.
+
+        Use tag_id=100639 for game-level bets (not futures).
+        """
+        game_tag = tag_id or 100639  # Default: game bets tag
+        events = await self.get_events_by_sport(tag_id=game_tag, active=True, limit=100)
+        markets: list[MarketState] = []
+        for event in events:
+            for market_data in event.get("markets", []):
+                market = self._parse_gamma_market(market_data)
+                if market:
+                    markets.append(market)
+        return markets
+
+    async def get_market_by_slug(self, slug: str) -> MarketState | None:
+        """Fetch a specific market by its slug (URL-friendly identifier)."""
+        try:
+            results = await self._gamma_request("/markets", params={"slug": slug})
+            if isinstance(results, list) and results:
+                return self._parse_gamma_market(results[0])
+            return None
+        except Exception:
+            self.logger.exception(f"Error fetching market by slug: {slug}")
+            return None
+
+    async def get_tags(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Get available tags/categories for filtering markets."""
+        try:
+            result = await self._gamma_request("/tags", params={"limit": limit})
+            return result if isinstance(result, list) else []
+        except Exception:
+            self.logger.exception("Error fetching tags")
+            return []
 
     # ---- Market Data ----
 
@@ -322,23 +409,66 @@ class PolymarketConnector(BaseMarketConnector):
                     elif outcome.lower() == "no":
                         no_price = p
 
+            question = data.get("question", "")
+            market_type, spread_line, total_line = self._detect_market_type(question)
+
             return MarketState(
                 platform=Platform.POLYMARKET,
                 market_id=data.get("conditionId", data.get("id", "")),
-                question=data.get("question", ""),
+                question=question,
                 yes_price=yes_price,
                 no_price=no_price,
                 volume_24h=float(data.get("volume24hr", 0)),
                 liquidity=float(data.get("liquidityNum", 0)),
+                market_type=market_type,
+                spread_line=spread_line,
+                total_line=total_line,
                 metadata={
                     "slug": data.get("slug", ""),
                     "end_date": data.get("endDate", ""),
                     "category": data.get("category", ""),
                     "clob_token_ids": data.get("clobTokenIds", []),
+                    "outcomes": outcomes,
                 },
             )
         except Exception:
             return None
+
+    @staticmethod
+    def _detect_market_type(question: str) -> tuple[MarketType, float | None, float | None]:
+        """Detect market type from question text. Returns (type, spread_line, total_line)."""
+        import re
+        q = question.lower()
+
+        # Spread: "Will X win by more than N?" or "X -N.5"
+        spread_match = re.search(
+            r'(?:win by (?:more than|over)|spread.*?)([\d]+\.?\d*)', q
+        )
+        if spread_match or "spread" in q or "win by" in q:
+            line = float(spread_match.group(1)) if spread_match else None
+            return MarketType.SPREAD, line, None
+
+        # Total: "over/under N" or "total score" or "combined score"
+        total_match = re.search(
+            r'(?:over|under|total|combined).*?([\d]+\.?\d*)', q
+        )
+        if "total" in q or "over/under" in q or "combined score" in q:
+            line = float(total_match.group(1)) if total_match else None
+            return MarketType.TOTAL, None, line
+
+        # Player prop: "will player X score/pass/rush"
+        if any(kw in q for kw in ["touchdown", "points", "yards", "assists", "rebounds", "goals scored by"]):
+            return MarketType.PLAYER_PROP, None, None
+
+        # Moneyline: "Will X win?" or "X vs Y"
+        if any(kw in q for kw in ["win", "beat", "defeat", "vs", "v."]):
+            return MarketType.MONEYLINE, None, None
+
+        # Futures: championship, mvp, etc.
+        if any(kw in q for kw in ["championship", "mvp", "win the", "super bowl", "world series"]):
+            return MarketType.FUTURES, None, None
+
+        return MarketType.BINARY, None, None
 
     def _parse_order_book(self, data: dict[str, Any]) -> OrderBook:
         bids = [

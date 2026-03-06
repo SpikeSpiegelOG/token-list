@@ -11,6 +11,10 @@ Where:
     f* = fraction of bankroll to bet
 
 Quarter Kelly: f = f* / 4
+
+Platform fee awareness:
+- Polymarket: 0% maker/taker fees
+- Kalshi: 0.07 × contracts × price × (1-price)
 """
 
 from __future__ import annotations
@@ -18,7 +22,19 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from src.core.models import Platform
+
 logger = logging.getLogger(__name__)
+
+
+def estimate_kalshi_fee_rate(price: float) -> float:
+    """Estimate Kalshi fee as a fraction of contract value.
+
+    Fee formula: 0.07 × contracts × price × (1-price)
+    As a rate per contract at given price: 0.07 × price × (1-price)
+    Maximum fee rate is at price=0.50: 0.07 × 0.25 = 0.0175 (1.75%)
+    """
+    return 0.07 * price * (1.0 - price)
 
 
 class PositionSizer:
@@ -41,6 +57,7 @@ class PositionSizer:
         edge: float,
         confidence: float,
         current_price: float,
+        platform: Platform = Platform.POLYMARKET,
     ) -> float:
         """Calculate optimal position size in USD.
 
@@ -48,6 +65,7 @@ class PositionSizer:
             edge: Our estimated edge (fair_value - market_price)
             confidence: Signal confidence (0-1)
             current_price: Current market price we'd be buying at
+            platform: Trading platform (affects fee calculation)
 
         Returns:
             Suggested position size in USD, or 0 if no trade.
@@ -61,17 +79,36 @@ class PositionSizer:
             logger.warning("Max open positions reached — no new positions")
             return 0.0
 
-        # Kelly Criterion for binary outcomes
-        # In prediction markets: buy at price p, win (1-p) profit, lose p
-        win_prob = min(current_price + edge, 0.99)  # Our estimated true probability
-        loss_prob = 1.0 - win_prob
-
         if current_price <= 0 or current_price >= 1:
             return 0.0
 
-        # Profit if we win: (1 - current_price) per dollar of contracts
-        # Loss if we lose: current_price per dollar of contracts
-        b = (1.0 - current_price) / current_price  # Odds ratio
+        # Subtract platform fees from expected profit
+        fee_rate = 0.0
+        if platform == Platform.KALSHI:
+            fee_rate = estimate_kalshi_fee_rate(current_price)
+        # Polymarket: 0% fees
+
+        # Adjust edge for fees — if edge doesn't exceed fee, no trade
+        effective_edge = edge - fee_rate
+        if effective_edge <= 0:
+            logger.debug(
+                f"Edge {edge:.4f} doesn't exceed fee rate {fee_rate:.4f} on {platform.value}, skipping"
+            )
+            return 0.0
+
+        # Kelly Criterion for binary outcomes
+        win_prob = min(current_price + effective_edge, 0.99)
+        loss_prob = 1.0 - win_prob
+
+        # Profit if we win: (1 - current_price - fee) per dollar of contracts
+        # Loss if we lose: (current_price + fee) per dollar of contracts
+        net_win = (1.0 - current_price) - fee_rate
+        net_loss = current_price + fee_rate
+
+        if net_win <= 0:
+            return 0.0
+
+        b = net_win / net_loss  # Fee-adjusted odds ratio
 
         # Full Kelly
         kelly_full = (b * win_prob - loss_prob) / b
@@ -96,7 +133,9 @@ class PositionSizer:
             f"Position size: ${size_usd:.2f} | "
             f"Kelly full: {kelly_full:.4f} | "
             f"Kelly adj: {kelly_adjusted:.4f} | "
-            f"Edge: {edge:.4f} | "
+            f"Edge: {edge:.4f} (eff: {effective_edge:.4f}) | "
+            f"Fee rate: {fee_rate:.4f} | "
+            f"Platform: {platform.value} | "
             f"Confidence: {confidence:.2f}"
         )
 

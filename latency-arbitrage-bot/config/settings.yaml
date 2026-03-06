@@ -11,6 +11,7 @@ bot:
   log_level: "INFO"
   max_concurrent_trades: 5
   check_interval_ms: 100  # How often to poll data sources (ms)
+  discovery_interval_s: 60  # How often to re-discover markets
 
 # ============================================================
 # DATA SOURCES - Fast information feeds
@@ -19,13 +20,18 @@ data_sources:
   espn:
     enabled: true
     base_url: "https://site.api.espn.com/apis/site/v2/sports"
+    plays_base_url: "https://sports.core.api.espn.com/v2/sports"
     poll_interval_ms: 500
+    enable_play_by_play: false  # Enable for deeper signals (more API calls)
     sports:
       - football/nfl
       - basketball/nba
       - baseball/mlb
       - hockey/nhl
       - soccer/eng.1
+      - football/college-football
+      - basketball/mens-college-basketball
+      - soccer/usa.1
     websocket_url: null  # ESPN doesn't offer WS, we poll aggressively
 
   weather:
@@ -105,16 +111,33 @@ markets:
     funder: "${POLYMARKET_FUNDER_ADDRESS}"
     max_position_size_usd: 100
     default_order_type: "limit"  # limit | market (GTC by default)
+    # Sport tag IDs for Gamma API filtering (discovered via GET /sports)
+    # These are examples — run `python -m src.cli search` to discover current tags
+    sport_tags:
+      nba: 100381
+      nfl: 100382
+      mlb: 100383
+      nhl: 100384
+      game_bets: 100639  # Filter to just game bets (not futures)
 
   kalshi:
     enabled: true
-    base_url: "https://trading-api.kalshi.com/trade-api/v2"
-    ws_url: "wss://trading-api.kalshi.com/trade-api/ws/v2"
+    # UPDATED: correct base URL (api.elections.kalshi.com covers ALL markets)
+    base_url: "https://api.elections.kalshi.com/trade-api/v2"
+    ws_url: "wss://api.elections.kalshi.com/trade-api/ws/v2"
     email: "${KALSHI_EMAIL}"
     password: "${KALSHI_PASSWORD}"
     api_key: "${KALSHI_API_KEY}"
     max_position_size_usd: 100
     default_order_type: "limit"
+    # Sports series tickers for discovery (Series -> Event -> Market hierarchy)
+    sport_series:
+      nfl: ["KXNFL", "KXNFLGAMES"]
+      nba: ["KXNBA", "KXNBAGAMES"]
+      mlb: ["KXMLB", "KXMLBGAMES"]
+      nhl: ["KXNHL", "KXNHLGAMES"]
+      ncaaf: ["KXNCAAF"]
+      ncaab: ["KXNCAAB"]
 
 # ============================================================
 # STRATEGY CONFIGURATION
@@ -139,6 +162,14 @@ strategy:
   max_daily_loss_usd: 200
   max_open_positions: 10
   stop_loss_pct: 0.15  # Exit if position loses 15%
+
+  # Market types to trade (comment out to disable)
+  trade_market_types:
+    - moneyline
+    - spread
+    - total
+    # - player_prop  # Requires play-by-play data
+    # - futures      # Longer-term, less suitable for latency arb
 
   # Correlation tracking
   track_data_source_latency: true

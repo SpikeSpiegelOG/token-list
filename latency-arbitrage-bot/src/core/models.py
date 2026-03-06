@@ -11,6 +11,9 @@ from typing import Any
 class SignalType(str, Enum):
     SPORTS_SCORE = "sports_score"
     SPORTS_STATUS = "sports_status"
+    SPORTS_SPREAD = "sports_spread"       # Score differential changed (affects spread markets)
+    SPORTS_TOTAL = "sports_total"         # Combined score changed (affects O/U markets)
+    SPORTS_PLAY = "sports_play"           # Individual play event (TD, goal, etc.)
     WEATHER_ALERT = "weather_alert"
     WEATHER_TEMPERATURE = "weather_temperature"
     WEATHER_WIND = "weather_wind"
@@ -18,6 +21,17 @@ class SignalType(str, Enum):
     NEWS_SENTIMENT = "news_sentiment"
     CRYPTO_PRICE = "crypto_price"
     CUSTOM = "custom"
+
+
+class MarketType(str, Enum):
+    """Type of prediction market contract."""
+    MONEYLINE = "moneyline"         # "Will team X win?"
+    SPREAD = "spread"               # "Will team X win by more than N?"
+    TOTAL = "total"                 # "Will total score be over N?"
+    PLAYER_PROP = "player_prop"     # "Will player X score N+ points?"
+    FUTURES = "futures"             # "Who will win the championship?"
+    BINARY = "binary"               # Generic yes/no (non-sports)
+    UNKNOWN = "unknown"
 
 
 class MarketSide(str, Enum):
@@ -85,6 +99,12 @@ class MarketState:
     last_updated_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     metadata: dict[str, Any] = field(default_factory=dict)
     order_book: OrderBook | None = None
+    market_type: MarketType = MarketType.UNKNOWN
+    # Spread/Total-specific fields
+    spread_line: float | None = None        # e.g., -3.5 for "win by more than 3.5"
+    total_line: float | None = None         # e.g., 47.5 for "over 47.5 total points"
+    home_team: str | None = None
+    away_team: str | None = None
 
     @property
     def spread(self) -> float:
