@@ -89,6 +89,35 @@ CREATE TABLE IF NOT EXISTS liquidations (
   price    DOUBLE  NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_liq_vst ON liquidations(venue, symbol, ts);
+
+CREATE TABLE IF NOT EXISTS macro_events (
+  id          VARCHAR PRIMARY KEY,
+  title       VARCHAR NOT NULL,
+  country     VARCHAR NOT NULL,
+  ts          BIGINT,
+  impact      VARCHAR NOT NULL,
+  forecast    VARCHAR,
+  previous    VARCHAR,
+  actual      VARCHAR,
+  url         VARCHAR,
+  fetched_at  BIGINT  NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_macro_ts ON macro_events(ts);
+CREATE INDEX IF NOT EXISTS idx_macro_title ON macro_events(title);
+
+CREATE TABLE IF NOT EXISTS news_items (
+  id          VARCHAR PRIMARY KEY,
+  source      VARCHAR NOT NULL,
+  ts          BIGINT  NOT NULL,
+  title       VARCHAR NOT NULL,
+  url         VARCHAR NOT NULL,
+  domain      VARCHAR,
+  sentiment   VARCHAR,
+  votes_pos   INTEGER NOT NULL DEFAULT 0,
+  votes_neg   INTEGER NOT NULL DEFAULT 0,
+  fetched_at  BIGINT  NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_news_ts ON news_items(ts);
 `;
 
 /**
@@ -270,6 +299,209 @@ export class Storage {
       symbol: String(r.symbol),
       ts: Number(r.ts),
       oi: Number(r.oi),
+    }));
+  }
+
+  /**
+   * Upsert a batch of macro events. ID is stable from (title, country, ts)
+   * so re-fetching the same week is idempotent.
+   */
+  async upsertMacroEvents(
+    rows: Array<{
+      id: string;
+      title: string;
+      country: string;
+      ts: number | null;
+      impact: string;
+      forecast: string | null;
+      previous: string | null;
+      actual: string | null;
+      url: string | null;
+      fetchedAt: number;
+    }>,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    const conn = this.requireConn();
+    const placeholders = rows.map(() => '(?,?,?,?,?,?,?,?,?,?)').join(',');
+    const params: DuckDBValue[] = [];
+    for (const r of rows) {
+      params.push(
+        r.id,
+        r.title,
+        r.country,
+        r.ts === null ? null : BigInt(r.ts),
+        r.impact,
+        r.forecast,
+        r.previous,
+        r.actual,
+        r.url,
+        BigInt(r.fetchedAt),
+      );
+    }
+    await conn.run(
+      `INSERT INTO macro_events
+       (id, title, country, ts, impact, forecast, previous, actual, url, fetched_at)
+       VALUES ${placeholders}
+       ON CONFLICT (id) DO UPDATE SET
+         forecast   = COALESCE(excluded.forecast, macro_events.forecast),
+         previous   = COALESCE(excluded.previous, macro_events.previous),
+         actual     = COALESCE(excluded.actual,   macro_events.actual),
+         fetched_at = excluded.fetched_at`,
+      params,
+    );
+  }
+
+  async getMacroEvents(opts: {
+    fromTs: number;
+    toTs: number;
+    impacts?: string[];
+    limit?: number;
+  }): Promise<
+    Array<{
+      id: string;
+      title: string;
+      country: string;
+      ts: number | null;
+      impact: string;
+      forecast: string | null;
+      previous: string | null;
+      actual: string | null;
+      url: string | null;
+    }>
+  > {
+    const conn = this.requireConn();
+    const limit = opts.limit ?? 500;
+    const params: DuckDBValue[] = [BigInt(opts.fromTs), BigInt(opts.toTs)];
+    let where = 'ts IS NOT NULL AND ts >= ? AND ts <= ?';
+    if (opts.impacts && opts.impacts.length > 0) {
+      where += ` AND impact IN (${opts.impacts.map(() => '?').join(',')})`;
+      for (const i of opts.impacts) params.push(i);
+    }
+    params.push(limit);
+    const reader = await conn.runAndReadAll(
+      `SELECT id, title, country, ts, impact, forecast, previous, actual, url
+       FROM macro_events
+       WHERE ${where}
+       ORDER BY ts ASC
+       LIMIT ?`,
+      params,
+    );
+    return (reader.getRowObjects() as Array<Record<string, unknown>>).map((r) => ({
+      id: String(r.id),
+      title: String(r.title),
+      country: String(r.country),
+      ts: r.ts === null || r.ts === undefined ? null : Number(r.ts),
+      impact: String(r.impact),
+      forecast: r.forecast == null ? null : String(r.forecast),
+      previous: r.previous == null ? null : String(r.previous),
+      actual: r.actual == null ? null : String(r.actual),
+      url: r.url == null ? null : String(r.url),
+    }));
+  }
+
+  async findMacroEventsByTitle(
+    titleLike: string,
+    fromTs: number,
+    toTs: number,
+    impacts: string[] = ['High', 'Medium'],
+  ): Promise<Array<{ ts: number | null }>> {
+    const conn = this.requireConn();
+    const params: DuckDBValue[] = [
+      `%${titleLike}%`,
+      BigInt(fromTs),
+      BigInt(toTs),
+    ];
+    let where = 'ts IS NOT NULL AND title ILIKE ? AND ts >= ? AND ts <= ?';
+    if (impacts.length > 0) {
+      where += ` AND impact IN (${impacts.map(() => '?').join(',')})`;
+      for (const i of impacts) params.push(i);
+    }
+    const reader = await conn.runAndReadAll(
+      `SELECT ts FROM macro_events WHERE ${where} ORDER BY ts ASC`,
+      params,
+    );
+    return (reader.getRowObjects() as Array<{ ts: bigint | number | null }>)
+      .map((r) => ({
+        ts: r.ts === null || r.ts === undefined ? null : Number(r.ts),
+      }));
+  }
+
+  async upsertNewsItems(
+    rows: Array<{
+      id: string;
+      source: string;
+      ts: number;
+      title: string;
+      url: string;
+      domain: string | null;
+      sentiment: string | null;
+      votesPos: number;
+      votesNeg: number;
+      fetchedAt: number;
+    }>,
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    const conn = this.requireConn();
+    const placeholders = rows.map(() => '(?,?,?,?,?,?,?,?,?,?)').join(',');
+    const params: DuckDBValue[] = [];
+    for (const r of rows) {
+      params.push(
+        r.id,
+        r.source,
+        BigInt(r.ts),
+        r.title,
+        r.url,
+        r.domain,
+        r.sentiment,
+        r.votesPos,
+        r.votesNeg,
+        BigInt(r.fetchedAt),
+      );
+    }
+    await conn.run(
+      `INSERT INTO news_items
+       (id, source, ts, title, url, domain, sentiment, votes_pos, votes_neg, fetched_at)
+       VALUES ${placeholders}
+       ON CONFLICT (id) DO UPDATE SET
+         votes_pos  = excluded.votes_pos,
+         votes_neg  = excluded.votes_neg,
+         sentiment  = COALESCE(excluded.sentiment, news_items.sentiment),
+         fetched_at = excluded.fetched_at`,
+      params,
+    );
+  }
+
+  async getRecentNews(limit = 50): Promise<
+    Array<{
+      id: string;
+      source: string;
+      ts: number;
+      title: string;
+      url: string;
+      domain: string | null;
+      sentiment: string | null;
+      votesPos: number;
+      votesNeg: number;
+    }>
+  > {
+    const conn = this.requireConn();
+    const reader = await conn.runAndReadAll(
+      `SELECT id, source, ts, title, url, domain, sentiment, votes_pos, votes_neg
+       FROM news_items
+       ORDER BY ts DESC
+       LIMIT ?`,
+      [limit],
+    );
+    return (reader.getRowObjects() as Array<Record<string, unknown>>).map((r) => ({
+      id: String(r.id),
+      source: String(r.source),
+      ts: Number(r.ts),
+      title: String(r.title),
+      url: String(r.url),
+      domain: r.domain == null ? null : String(r.domain),
+      sentiment: r.sentiment == null ? null : String(r.sentiment),
+      votesPos: Number(r.votes_pos ?? 0),
+      votesNeg: Number(r.votes_neg ?? 0),
     }));
   }
 

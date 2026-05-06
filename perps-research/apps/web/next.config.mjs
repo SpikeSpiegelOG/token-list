@@ -19,6 +19,7 @@ const nextConfig = {
     '@perps/backtest',
     '@perps/core',
     '@perps/indicators',
+    '@perps/macro',
     '@perps/storage',
     '@perps/strategies',
     '@perps/venue-binance',

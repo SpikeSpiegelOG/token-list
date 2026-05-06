@@ -57,6 +57,9 @@ importers:
       '@perps/indicators':
         specifier: workspace:*
         version: link:../../packages/indicators
+      '@perps/macro':
+        specifier: workspace:*
+        version: link:../../packages/macro
       '@perps/storage':
         specifier: workspace:*
         version: link:../../packages/storage
@@ -112,6 +115,19 @@ importers:
         version: 5.9.3
 
   packages/indicators:
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/macro:
+    dependencies:
+      '@perps/core':
+        specifier: workspace:*
+        version: link:../core
+      '@perps/storage':
+        specifier: workspace:*
+        version: link:../storage
     devDependencies:
       typescript:
         specifier: ^5.7.2

@@ -13,6 +13,7 @@
     "@perps/backtest": "workspace:*",
     "@perps/core": "workspace:*",
     "@perps/indicators": "workspace:*",
+    "@perps/macro": "workspace:*",
     "@perps/storage": "workspace:*",
     "@perps/strategies": "workspace:*",
     "@perps/venue-binance": "workspace:*",

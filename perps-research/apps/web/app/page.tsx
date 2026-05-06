@@ -46,10 +46,16 @@ export default function Home() {
             replay 1m bars through a strategy, see equity / Sharpe / DD
           </span>
         </li>
+        <li style={{ marginBottom: 8 }}>
+          <Link href="/macro">/macro</Link>
+          <span style={{ color: '#8a93a6', marginLeft: 8, fontSize: 12 }}>
+            CPI / FOMC / NFP calendar, news, event-impact correlation
+          </span>
+        </li>
       </ul>
 
       <p style={{ color: '#8a93a6', marginTop: 32, fontSize: 12 }}>
-        Phase 3. Real-money order routing is intentionally out of scope.
+        Phase 4. Real-money order routing is intentionally out of scope.
       </p>
     </main>
   );

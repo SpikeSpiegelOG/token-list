@@ -30,9 +30,10 @@ packages/
     hyperliquid/   wss://api.hyperliquid.xyz/ws adapter
     binance/       wss://fstream.binance.com adapter (geo-restricted)
   storage/         DuckDB schema + tick→bar rollup
-  indicators/      EMA (more in Phase 4)
+  indicators/      EMA (more in Phase 5)
   backtest/        Event-driven engine, slippage model, metrics
   strategies/      Starter hypotheses + registry
+  macro/           Calendar + news ingest + event-impact correlation
 infra/             fly.toml + Dockerfile (Phase 2.5)
 ```
 
@@ -121,15 +122,45 @@ standalone worker — the standalone entrypoint is preserved at
 > monte-carlo over reasonable parameter neighbourhoods. The shipped page
 > is plumbing; the rigour comes in Phase 5.
 
-## Phases 4–5 (gated on review)
+## Phase 4 — macro/news + event-impact correlation (shipped)
 
-- **4** — Macro/news ingestion (FRED, BLS, CryptoPanic, econ calendar) and
-  event-impact correlation page; funding-arb v2 wired to the historical
-  funding feed.
-- **5** — Paper trader with live equity curve, walk-forward backtest
-  harness, parameter monte-carlo.
-- **2.5 (optional)** — fly.io `Dockerfile` + `fly.web.toml`, region-pinned
-  ingest, Coinbase Perps adapter (US-friendly).
+- **`@perps/macro`** package:
+  - **ForexFactory weekly XML** parser (no auth) — fetched every 6h.
+    Extracts title / country / time / impact / forecast / previous;
+    converts ET timestamps to UTC ms; assigns stable IDs from
+    sha256(title|country|ts).
+  - **CryptoPanic** client — gated by `CRYPTOPANIC_TOKEN`; refreshes every
+    5m when set, no-op when unset.
+  - **`computeEventImpact`** — for events whose title matches a
+    substring filter, computes mean / median / std of % returns at a
+    grid of offsets {-15m, -5m, -1m, 0, +1m, +5m, +15m, +60m, +4h, +6h}
+    against the locally stored 1m bars.
+- New tables: `macro_events` (idempotent upsert by id, so re-fetching the
+  same week is safe), `news_items`.
+- New endpoints: `/api/macro/events`, `/api/macro/news`,
+  `/api/macro/impact`.
+- **/macro** UI: upcoming calendar (high+medium impact, next 7 days),
+  recent past events, news feed, and an interactive event-impact panel
+  for CPI / PPI / NFP / FOMC / GDP / PCE / Unemployment Rate.
+
+> **Why this matters for trading.** Crypto reacts to US macro releases
+> (CPI, FOMC, NFP) often more aggressively than equities; the
+> event-impact panel is the cheapest way to discover or refute "X always
+> dumps on hot CPI" without reading talking heads. Sample sizes are
+> small to start — the panel is most useful after several weeks of
+> accumulated bar history covering a few release cycles.
+
+> **Caveats baked into the page.** Unstratified single-window stats
+> conflate regimes (rate-cut vs hike, hot vs cold print). A 3-event mean
+> tells you about three days, not about CPI in general. Treat the
+> numbers as a starting point for hypothesis design, not as a signal.
+
+## Phase 5 (gated on review)
+
+- Paper trader with live equity curve, walk-forward backtest harness,
+  parameter monte-carlo, regime-stratified impact stats.
+- **2.5 (optional)** — fly.io `Dockerfile` + `fly.web.toml`,
+  region-pinned ingest, Coinbase Perps adapter (US-friendly).
 
 ## Hard limits
 

@@ -19,6 +19,7 @@ export async function register() {
   const { Storage, BarRollup } = await import('@perps/storage');
   const { HyperliquidAdapter } = await import('@perps/venue-hyperliquid');
   const { BinanceFuturesAdapter } = await import('@perps/venue-binance');
+  const { startMacroFetchers } = await import('@perps/macro');
 
   const symbols = (process.env.INGEST_SYMBOLS ?? 'BTC,ETH,SOL')
     .split(',')
@@ -107,8 +108,16 @@ export async function register() {
 
   globalThis.__perpsStorage = storage;
 
+  // Phase 4: macro/news fetchers. Calendar runs without keys; CryptoPanic
+  // is gated by CRYPTOPANIC_TOKEN — both fail soft.
+  const macroEnabled = process.env.PERPS_DISABLE_MACRO !== '1';
+  const macroHandle = macroEnabled
+    ? startMacroFetchers({ storage })
+    : null;
+
   const shutdown = async (signal: string) => {
     console.log(`[instrumentation] ${signal} — shutting down`);
+    macroHandle?.stop();
     for (const a of adapters) {
       await a.stop();
     }
