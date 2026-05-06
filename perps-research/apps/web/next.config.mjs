@@ -20,6 +20,7 @@ const nextConfig = {
     '@perps/core',
     '@perps/indicators',
     '@perps/macro',
+    '@perps/paper',
     '@perps/storage',
     '@perps/strategies',
     '@perps/venue-binance',

@@ -8,6 +8,12 @@
  * For production / multi-machine deploys (Phase 2.5+), run apps/ingest as a
  * separate worker against a shared database (Postgres/TimescaleDB) instead.
  */
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __perpsPaperEngine: import('@perps/paper').PaperEngine | undefined;
+}
+
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
   // Disable inside `next build` static generation.
@@ -20,6 +26,8 @@ export async function register() {
   const { HyperliquidAdapter } = await import('@perps/venue-hyperliquid');
   const { BinanceFuturesAdapter } = await import('@perps/venue-binance');
   const { startMacroFetchers } = await import('@perps/macro');
+  const { PaperEngine } = await import('@perps/paper');
+  const { buildStrategy } = await import('@perps/strategies');
 
   const symbols = (process.env.INGEST_SYMBOLS ?? 'BTC,ETH,SOL')
     .split(',')
@@ -114,6 +122,55 @@ export async function register() {
   const macroHandle = macroEnabled
     ? startMacroFetchers({ storage })
     : null;
+
+  // Phase 5: optional paper trader. Configure via env:
+  //   PERPS_PAPER_STRATEGY=momentum-breakout
+  //   PERPS_PAPER_SYMBOL=BTC
+  //   PERPS_PAPER_VENUE=hyperliquid       (default: hyperliquid)
+  //   PERPS_PAPER_PARAMS='{"lookback":30}'
+  //   PERPS_PAPER_INITIAL_CASH=10000      (default: 10000)
+  //   PERPS_PAPER_SIZE=0.05               (default: 0.05)
+  //   PERPS_PAPER_RUN_ID=default          (default: default)
+  let paperEngine: import('@perps/paper').PaperEngine | null = null;
+  if (process.env.PERPS_PAPER_STRATEGY) {
+    const stratId = process.env.PERPS_PAPER_STRATEGY;
+    const paperVenue = (process.env.PERPS_PAPER_VENUE ?? 'hyperliquid') as
+      | 'hyperliquid'
+      | 'binance';
+    const paperSymbol = process.env.PERPS_PAPER_SYMBOL ?? symbols[0] ?? 'BTC';
+    const stratParams = (() => {
+      try {
+        return JSON.parse(process.env.PERPS_PAPER_PARAMS ?? '{}');
+      } catch {
+        console.warn('[paper] invalid PERPS_PAPER_PARAMS JSON; using defaults');
+        return {};
+      }
+    })();
+    const strategy = buildStrategy(stratId, stratParams);
+    paperEngine = new PaperEngine({
+      cfg: {
+        runId: process.env.PERPS_PAPER_RUN_ID ?? 'default',
+        venue: paperVenue,
+        symbol: paperSymbol,
+        strategyId: stratId,
+        strategyParams: stratParams,
+        strategy,
+        initialCash: Number(process.env.PERPS_PAPER_INITIAL_CASH ?? 10_000),
+        defaultSize: Number(process.env.PERPS_PAPER_SIZE ?? 0.05),
+      },
+      storage,
+    });
+    await paperEngine.start();
+    rollup.onClose((bar) => {
+      void paperEngine?.onClosedBar(bar).catch((err) =>
+        console.error('[paper] onClosedBar threw', err),
+      );
+    });
+    globalThis.__perpsPaperEngine = paperEngine;
+    console.log(
+      `[paper] running ${stratId} on ${paperVenue}/${paperSymbol} (run_id=${process.env.PERPS_PAPER_RUN_ID ?? 'default'})`,
+    );
+  }
 
   const shutdown = async (signal: string) => {
     console.log(`[instrumentation] ${signal} — shutting down`);

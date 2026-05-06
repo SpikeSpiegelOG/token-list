@@ -118,6 +118,39 @@ CREATE TABLE IF NOT EXISTS news_items (
   fetched_at  BIGINT  NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_news_ts ON news_items(ts);
+
+CREATE TABLE IF NOT EXISTS paper_runs (
+  run_id           VARCHAR PRIMARY KEY,
+  venue            VARCHAR NOT NULL,
+  symbol           VARCHAR NOT NULL,
+  strategy_id      VARCHAR NOT NULL,
+  strategy_params  VARCHAR NOT NULL,
+  initial_cash     DOUBLE  NOT NULL,
+  started_at       BIGINT  NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS paper_equity (
+  run_id      VARCHAR NOT NULL,
+  ts          BIGINT  NOT NULL,
+  equity      DOUBLE  NOT NULL,
+  position    DOUBLE  NOT NULL,
+  avg_entry   DOUBLE  NOT NULL,
+  last_close  DOUBLE  NOT NULL,
+  bars_seen   INTEGER NOT NULL,
+  fills_seen  INTEGER NOT NULL,
+  PRIMARY KEY (run_id, ts)
+);
+
+CREATE TABLE IF NOT EXISTS paper_fills (
+  run_id    VARCHAR NOT NULL,
+  ts        BIGINT  NOT NULL,
+  side      VARCHAR NOT NULL,
+  price     DOUBLE  NOT NULL,
+  size      DOUBLE  NOT NULL,
+  fee       DOUBLE  NOT NULL,
+  reason    VARCHAR NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fills_run ON paper_fills(run_id, ts);
 `;
 
 /**
@@ -502,6 +535,162 @@ export class Storage {
       sentiment: r.sentiment == null ? null : String(r.sentiment),
       votesPos: Number(r.votes_pos ?? 0),
       votesNeg: Number(r.votes_neg ?? 0),
+    }));
+  }
+
+  // -------------------- paper-trader persistence --------------------
+
+  async upsertPaperRun(row: {
+    runId: string;
+    venue: string;
+    symbol: string;
+    strategyId: string;
+    strategyParams: string;
+    initialCash: number;
+    startedAt: number;
+  }): Promise<void> {
+    const conn = this.requireConn();
+    await conn.run(
+      `INSERT INTO paper_runs (run_id, venue, symbol, strategy_id, strategy_params, initial_cash, started_at)
+       VALUES (?,?,?,?,?,?,?)
+       ON CONFLICT (run_id) DO UPDATE SET
+         strategy_id     = excluded.strategy_id,
+         strategy_params = excluded.strategy_params,
+         initial_cash    = excluded.initial_cash`,
+      [
+        row.runId,
+        row.venue,
+        row.symbol,
+        row.strategyId,
+        row.strategyParams,
+        row.initialCash,
+        BigInt(row.startedAt),
+      ],
+    );
+  }
+
+  async insertPaperEquity(row: {
+    runId: string;
+    ts: number;
+    equity: number;
+    position: number;
+    avgEntry: number;
+    lastClose: number;
+    barsSeen: number;
+    fillsSeen: number;
+  }): Promise<void> {
+    const conn = this.requireConn();
+    await conn.run(
+      `INSERT INTO paper_equity (run_id, ts, equity, position, avg_entry, last_close, bars_seen, fills_seen)
+       VALUES (?,?,?,?,?,?,?,?)
+       ON CONFLICT (run_id, ts) DO UPDATE SET
+         equity     = excluded.equity,
+         position   = excluded.position,
+         avg_entry  = excluded.avg_entry,
+         last_close = excluded.last_close,
+         bars_seen  = excluded.bars_seen,
+         fills_seen = excluded.fills_seen`,
+      [
+        row.runId,
+        BigInt(row.ts),
+        row.equity,
+        row.position,
+        row.avgEntry,
+        row.lastClose,
+        row.barsSeen,
+        row.fillsSeen,
+      ],
+    );
+  }
+
+  async insertPaperFill(row: {
+    runId: string;
+    ts: number;
+    side: string;
+    price: number;
+    size: number;
+    fee: number;
+    reason: string;
+  }): Promise<void> {
+    const conn = this.requireConn();
+    await conn.run(
+      `INSERT INTO paper_fills (run_id, ts, side, price, size, fee, reason)
+       VALUES (?,?,?,?,?,?,?)`,
+      [
+        row.runId,
+        BigInt(row.ts),
+        row.side,
+        row.price,
+        row.size,
+        row.fee,
+        row.reason,
+      ],
+    );
+  }
+
+  async getPaperEquity(
+    runId: string,
+    limit = 5_000,
+  ): Promise<
+    Array<{
+      ts: number;
+      equity: number;
+      position: number;
+      avgEntry: number;
+      lastClose: number;
+      barsSeen: number;
+      fillsSeen: number;
+    }>
+  > {
+    const conn = this.requireConn();
+    const reader = await conn.runAndReadAll(
+      `SELECT ts, equity, position, avg_entry, last_close, bars_seen, fills_seen
+       FROM paper_equity
+       WHERE run_id = ?
+       ORDER BY ts DESC
+       LIMIT ?`,
+      [runId, limit],
+    );
+    return (reader.getRowObjects() as Array<Record<string, unknown>>).map((r) => ({
+      ts: Number(r.ts),
+      equity: Number(r.equity),
+      position: Number(r.position),
+      avgEntry: Number(r.avg_entry),
+      lastClose: Number(r.last_close),
+      barsSeen: Number(r.bars_seen),
+      fillsSeen: Number(r.fills_seen),
+    }));
+  }
+
+  async getPaperFills(
+    runId: string,
+    limit = 200,
+  ): Promise<
+    Array<{
+      ts: number;
+      side: string;
+      price: number;
+      size: number;
+      fee: number;
+      reason: string;
+    }>
+  > {
+    const conn = this.requireConn();
+    const reader = await conn.runAndReadAll(
+      `SELECT ts, side, price, size, fee, reason
+       FROM paper_fills
+       WHERE run_id = ?
+       ORDER BY ts DESC
+       LIMIT ?`,
+      [runId, limit],
+    );
+    return (reader.getRowObjects() as Array<Record<string, unknown>>).map((r) => ({
+      ts: Number(r.ts),
+      side: String(r.side),
+      price: Number(r.price),
+      size: Number(r.size),
+      fee: Number(r.fee),
+      reason: String(r.reason),
     }));
   }
 

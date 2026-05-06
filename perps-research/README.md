@@ -34,6 +34,7 @@ packages/
   backtest/        Event-driven engine, slippage model, metrics
   strategies/      Starter hypotheses + registry
   macro/           Calendar + news ingest + event-impact correlation
+  paper/           Live paper trader (same fill/slippage as backtest)
 infra/             fly.toml + Dockerfile (Phase 2.5)
 ```
 
@@ -155,12 +156,51 @@ standalone worker — the standalone entrypoint is preserved at
 > tells you about three days, not about CPI in general. Treat the
 > numbers as a starting point for hypothesis design, not as a signal.
 
-## Phase 5 (gated on review)
+## Phase 5 — paper trader (shipped)
 
-- Paper trader with live equity curve, walk-forward backtest harness,
-  parameter monte-carlo, regime-stratified impact stats.
-- **2.5 (optional)** — fly.io `Dockerfile` + `fly.web.toml`,
-  region-pinned ingest, Coinbase Perps adapter (US-friendly).
+- **`@perps/paper`**: a `PaperEngine` that subscribes to closed 1m bars
+  from the rollup and runs a strategy through the same `StrategyContext`
+  shape the backtester uses. A strategy validated in `/backtest` runs
+  unchanged in `/paper`.
+- Same slippage / fee model as the backtester (half-spread + flat taker
+  fee), so paper PnL is directly comparable to backtest PnL.
+- Persistent across restarts: state (cash, position, avg entry) is
+  reconstructed from `paper_equity` on startup, so the run accumulates
+  history across server cycles. Run keyed by `runId` (env
+  `PERPS_PAPER_RUN_ID`, default `"default"`).
+- New tables: `paper_runs`, `paper_equity` (PK on (run_id, ts)),
+  `paper_fills`. Equity curve query and fills tape both run from these.
+- New endpoints: `/api/paper/status`, `/api/paper/equity`,
+  `/api/paper/fills`.
+- **/paper** UI: status grid (equity / position / bars / fills),
+  live-updating equity curve, last-20 fills.
+
+### Enabling the paper trader
+
+```sh
+PERPS_PAPER_STRATEGY=momentum-breakout \
+PERPS_PAPER_SYMBOL=BTC \
+PERPS_PAPER_PARAMS='{"lookback":20,"minVolPct":0.0005}' \
+PERPS_PAPER_INITIAL_CASH=10000 \
+PERPS_PAPER_SIZE=0.05 \
+pnpm start
+```
+
+Without `PERPS_PAPER_STRATEGY` the page renders an instructions stub —
+no engine is created, no rows are written.
+
+> **Why paper before real.** A backtest result that survives one month
+> of live paper-trading on out-of-sample bars (different from those used
+> to tune parameters) is roughly the *minimum* evidence to consider real
+> capital. The default fees + half-spread make this conservative on
+> purpose — assume worse, not better, in real markets.
+
+## Optional next phases
+
+- **2.5** — fly.io `Dockerfile` + `fly.web.toml`, region-pinned ingest,
+  Coinbase Perps adapter (US-friendly).
+- **6** — Walk-forward backtest harness, parameter monte-carlo,
+  regime-stratified macro impact stats.
 
 ## Hard limits
 

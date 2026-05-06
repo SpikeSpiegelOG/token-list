@@ -60,6 +60,9 @@ importers:
       '@perps/macro':
         specifier: workspace:*
         version: link:../../packages/macro
+      '@perps/paper':
+        specifier: workspace:*
+        version: link:../../packages/paper
       '@perps/storage':
         specifier: workspace:*
         version: link:../../packages/storage
@@ -128,6 +131,25 @@ importers:
       '@perps/storage':
         specifier: workspace:*
         version: link:../storage
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/paper:
+    dependencies:
+      '@perps/backtest':
+        specifier: workspace:*
+        version: link:../backtest
+      '@perps/core':
+        specifier: workspace:*
+        version: link:../core
+      '@perps/storage':
+        specifier: workspace:*
+        version: link:../storage
+      '@perps/strategies':
+        specifier: workspace:*
+        version: link:../strategies
     devDependencies:
       typescript:
         specifier: ^5.7.2

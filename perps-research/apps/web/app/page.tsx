@@ -52,10 +52,16 @@ export default function Home() {
             CPI / FOMC / NFP calendar, news, event-impact correlation
           </span>
         </li>
+        <li style={{ marginBottom: 8 }}>
+          <Link href="/paper">/paper</Link>
+          <span style={{ color: '#8a93a6', marginLeft: 8, fontSize: 12 }}>
+            live paper trader (gated by PERPS_PAPER_STRATEGY env)
+          </span>
+        </li>
       </ul>
 
       <p style={{ color: '#8a93a6', marginTop: 32, fontSize: 12 }}>
-        Phase 4. Real-money order routing is intentionally out of scope.
+        Phase 5. Real-money order routing is intentionally out of scope.
       </p>
     </main>
   );
