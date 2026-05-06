@@ -16,9 +16,11 @@ const nextConfig = {
     'utf-8-validate',
   ],
   transpilePackages: [
+    '@perps/backtest',
     '@perps/core',
     '@perps/indicators',
     '@perps/storage',
+    '@perps/strategies',
     '@perps/venue-binance',
     '@perps/venue-hyperliquid',
   ],

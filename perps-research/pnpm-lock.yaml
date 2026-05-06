@@ -48,6 +48,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@perps/backtest':
+        specifier: workspace:*
+        version: link:../../packages/backtest
       '@perps/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -57,6 +60,9 @@ importers:
       '@perps/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+      '@perps/strategies':
+        specifier: workspace:*
+        version: link:../../packages/strategies
       '@perps/venue-binance':
         specifier: workspace:*
         version: link:../../packages/venues/binance
@@ -89,6 +95,16 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  packages/backtest:
+    dependencies:
+      '@perps/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   packages/core:
     devDependencies:
       typescript:
@@ -109,6 +125,22 @@ importers:
       '@perps/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/strategies:
+    dependencies:
+      '@perps/backtest':
+        specifier: workspace:*
+        version: link:../backtest
+      '@perps/core':
+        specifier: workspace:*
+        version: link:../core
+      '@perps/indicators':
+        specifier: workspace:*
+        version: link:../indicators
     devDependencies:
       typescript:
         specifier: ^5.7.2

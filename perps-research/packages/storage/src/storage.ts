@@ -195,6 +195,37 @@ export class Storage {
       .reverse();
   }
 
+  /**
+   * Bars within a closed time range, oldest first. Used by the backtester
+   * to replay history without paginating.
+   */
+  async getCandlesInRange(
+    venue: string,
+    symbol: string,
+    startMs: number,
+    endMs: number,
+    limit = 100_000,
+  ): Promise<CandleRow[]> {
+    const conn = this.requireConn();
+    const reader = await conn.runAndReadAll(
+      `SELECT ts, o, h, l, c, v
+       FROM bars_1m
+       WHERE venue = ? AND symbol = ? AND ts >= ? AND ts <= ?
+       ORDER BY ts ASC
+       LIMIT ?`,
+      [venue, symbol, BigInt(startMs), BigInt(endMs), limit],
+    );
+    const rows = reader.getRowObjects() as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      ts: Number(r.ts),
+      o: Number(r.o),
+      h: Number(r.h),
+      l: Number(r.l),
+      c: Number(r.c),
+      v: Number(r.v),
+    }));
+  }
+
   async tickCount(): Promise<number> {
     const conn = this.requireConn();
     const reader = await conn.runAndReadAll('SELECT count(*) AS n FROM ticks');

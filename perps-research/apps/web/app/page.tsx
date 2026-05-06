@@ -38,8 +38,18 @@ export default function Home() {
         </li>
       </ul>
 
+      <h2 style={{ fontSize: 16, marginTop: 24 }}>Research</h2>
+      <ul style={{ listStyle: 'none', padding: 0 }}>
+        <li style={{ marginBottom: 8 }}>
+          <Link href="/backtest">/backtest</Link>
+          <span style={{ color: '#8a93a6', marginLeft: 8, fontSize: 12 }}>
+            replay 1m bars through a strategy, see equity / Sharpe / DD
+          </span>
+        </li>
+      </ul>
+
       <p style={{ color: '#8a93a6', marginTop: 32, fontSize: 12 }}>
-        Phase 2. Real-money order routing is intentionally out of scope.
+        Phase 3. Real-money order routing is intentionally out of scope.
       </p>
     </main>
   );

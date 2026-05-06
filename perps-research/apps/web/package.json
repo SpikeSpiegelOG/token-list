@@ -10,9 +10,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@perps/backtest": "workspace:*",
     "@perps/core": "workspace:*",
     "@perps/indicators": "workspace:*",
     "@perps/storage": "workspace:*",
+    "@perps/strategies": "workspace:*",
     "@perps/venue-binance": "workspace:*",
     "@perps/venue-hyperliquid": "workspace:*",
     "lightweight-charts": "^5.0.7",

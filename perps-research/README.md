@@ -28,9 +28,12 @@ packages/
   core/            Shared types: Tick, Bar, Funding, Order, Fill, Signal
   venues/
     hyperliquid/   wss://api.hyperliquid.xyz/ws adapter
+    binance/       wss://fstream.binance.com adapter (geo-restricted)
   storage/         DuckDB schema + tick→bar rollup
-  indicators/      EMA, RSI, ATR, ... (Phase 1: EMA only)
-infra/             fly.toml + Dockerfile (Phase 2)
+  indicators/      EMA (more in Phase 4)
+  backtest/        Event-driven engine, slippage model, metrics
+  strategies/      Starter hypotheses + registry
+infra/             fly.toml + Dockerfile (Phase 2.5)
 ```
 
 ## Phase 1 — vertical slice (shipped)
@@ -92,13 +95,39 @@ standalone worker — the standalone entrypoint is preserved at
 5. Killing/restarting `apps/ingest` reconnects within ~5s; chart history
    persists across reloads.
 
-## Phases 3–5 (gated on review)
+## Phase 3 — backtest engine + starter strategies (shipped)
 
-- **3** — Event-driven backtest engine + three baseline strategies
-  (momentum-breakout, funding-arb, liq-sweep-fade), `/backtest` page.
+- `@perps/backtest` event-driven engine: replays bars through a `Strategy`,
+  routes orders through a half-spread + taker-fee slippage model, marks
+  equity bar-by-bar, force-closes any open position at end-of-run.
+- Metrics: total return, Sharpe, Sortino, max drawdown, win rate,
+  expectancy, exposure, trade count. Annualisation defaults to 1m bars.
+- `@perps/strategies` registry with three hypotheses, each parameterised:
+  - **momentum-breakout** — N-bar high/low breakout with ATR vol gate and
+    trailing ATR stop.
+  - **liq-sweep-fade** — fade outsized one-bar moves (range proxy for a
+    liq cascade); upgrades to a real `liquidations`-table trigger in
+    Phase 4.
+  - **funding-arb** — proxy version using price-vs-EMA stretch; replaced
+    by a basis-vs-funding pair trade once the engine accepts a Funding
+    stream.
+- `/backtest` UI page: pick strategy + symbol + lookback window + tweak
+  params, render equity curve via Lightweight Charts AreaSeries, see
+  metrics + last-20 trade list.
+
+> **What "Sharpe 11" means in a 200-bar run.** Nothing. Single backtest
+> runs are noise. Real evaluation needs walk-forward out-of-sample,
+> regime stratification (trending vs chop vs liquidation cascade), and
+> monte-carlo over reasonable parameter neighbourhoods. The shipped page
+> is plumbing; the rigour comes in Phase 5.
+
+## Phases 4–5 (gated on review)
+
 - **4** — Macro/news ingestion (FRED, BLS, CryptoPanic, econ calendar) and
-  event-impact correlation page.
-- **5** — Paper trader with live equity curve.
+  event-impact correlation page; funding-arb v2 wired to the historical
+  funding feed.
+- **5** — Paper trader with live equity curve, walk-forward backtest
+  harness, parameter monte-carlo.
 - **2.5 (optional)** — fly.io `Dockerfile` + `fly.web.toml`, region-pinned
   ingest, Coinbase Perps adapter (US-friendly).
 
