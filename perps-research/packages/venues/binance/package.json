@@ -1,22 +1,26 @@
 {
-  "name": "@perps/ingest",
+  "name": "@perps/venue-binance",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
-    "dev": "tsx watch src/main.ts",
-    "start": "tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@perps/core": "workspace:*",
-    "@perps/storage": "workspace:*",
-    "@perps/venue-binance": "workspace:*",
-    "@perps/venue-hyperliquid": "workspace:*"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "tsx": "^4.19.2",
+    "@types/ws": "^8.5.13",
     "typescript": "^5.7.2"
   }
 }

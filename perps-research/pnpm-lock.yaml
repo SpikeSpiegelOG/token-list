@@ -32,6 +32,9 @@ importers:
       '@perps/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+      '@perps/venue-binance':
+        specifier: workspace:*
+        version: link:../../packages/venues/binance
       '@perps/venue-hyperliquid':
         specifier: workspace:*
         version: link:../../packages/venues/hyperliquid
@@ -54,6 +57,9 @@ importers:
       '@perps/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+      '@perps/venue-binance':
+        specifier: workspace:*
+        version: link:../../packages/venues/binance
       '@perps/venue-hyperliquid':
         specifier: workspace:*
         version: link:../../packages/venues/hyperliquid
@@ -104,6 +110,22 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/venues/binance:
+    dependencies:
+      '@perps/core':
+        specifier: workspace:*
+        version: link:../../core
+      ws:
+        specifier: ^8.18.0
+        version: 8.20.0
+    devDependencies:
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

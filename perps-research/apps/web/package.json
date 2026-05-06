@@ -13,6 +13,7 @@
     "@perps/core": "workspace:*",
     "@perps/indicators": "workspace:*",
     "@perps/storage": "workspace:*",
+    "@perps/venue-binance": "workspace:*",
     "@perps/venue-hyperliquid": "workspace:*",
     "lightweight-charts": "^5.0.7",
     "ws": "^8.18.0",

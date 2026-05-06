@@ -33,10 +33,32 @@ packages/
 infra/             fly.toml + Dockerfile (Phase 2)
 ```
 
-## Phase 1 (this session) — vertical slice
+## Phase 1 — vertical slice (shipped)
 
 Live Hyperliquid trades → DuckDB → Next.js candlestick chart with EMA(20)
 overlay, plus an SSE stream that pushes each new tick.
+
+## Phase 2 — multi-venue + funding/OI/liquidations (shipped)
+
+- **Hyperliquid** also subscribes to `activeAssetCtx` per coin → emits
+  `Funding` (hourly rate) and `OpenInterest`.
+- **Binance USDⓈ-M Futures** adapter: `aggTrade`, `markPrice@1s` (funding),
+  `forceOrder` (liquidations); REST poller for OI every 60s.
+- New tables: `funding`, `open_interest`, `liquidations`. Funding/OI are
+  throttled at the bus subscriber so we only persist on rate change OR
+  every 60s.
+- **/funding** — cross-venue heatmap with naive-APR for each rate, plus OI
+  side-by-side. Color saturated at |rate| = 5bp/period.
+- **/liquidations** — live Binance forceOrder tape with rolling 60s
+  long/short notional summary.
+
+> **Geo-restriction note.** Binance Futures REST + WS reject from US-based
+> IPs (HTTP 451 + silent WS no-data). The code path is correct but
+> verifying Binance live data requires running ingest from a non-US region
+> — fly.io with `primary_region = "nrt"` (Tokyo) or `"fra"` (Frankfurt)
+> works. Hyperliquid has no such restriction. Configure venue selection
+> via `INGEST_VENUES=hyperliquid,binance` (or just `hyperliquid` for US
+> dev).
 
 ### Run it locally
 
@@ -70,15 +92,15 @@ standalone worker — the standalone entrypoint is preserved at
 5. Killing/restarting `apps/ingest` reconnects within ~5s; chart history
    persists across reloads.
 
-## Phases 2–5 (gated on review)
+## Phases 3–5 (gated on review)
 
-- **2** — Binance Futures + Coinbase Perps adapters, funding/OI/liquidation
-  streams, fly.io deploy.
 - **3** — Event-driven backtest engine + three baseline strategies
   (momentum-breakout, funding-arb, liq-sweep-fade), `/backtest` page.
 - **4** — Macro/news ingestion (FRED, BLS, CryptoPanic, econ calendar) and
   event-impact correlation page.
 - **5** — Paper trader with live equity curve.
+- **2.5 (optional)** — fly.io `Dockerfile` + `fly.web.toml`, region-pinned
+  ingest, Coinbase Perps adapter (US-friendly).
 
 ## Hard limits
 

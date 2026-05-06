@@ -1,4 +1,4 @@
-import type { Tick, VenueAdapter } from '@perps/core';
+import type { Funding, OpenInterest, Tick, VenueAdapter } from '@perps/core';
 
 // Dynamic import keeps `ws` (and its optional native deps) opaque to
 // bundlers. Next.js's webpack mangles a static `import 'ws'` even when the
@@ -20,6 +20,19 @@ interface HlTrade {
   tid?: number;
 }
 
+interface HlActiveAssetCtx {
+  coin: string;
+  ctx: {
+    markPx?: number | string;
+    midPx?: number | string;
+    oraclePx?: number | string;
+    funding?: number | string;
+    openInterest?: number | string;
+    dayNtlVlm?: number | string;
+    prevDayPx?: number | string;
+  };
+}
+
 interface HlEnvelope {
   channel: string;
   data: unknown;
@@ -30,12 +43,20 @@ const PING_INTERVAL_MS = 30_000;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 
+/** HL funding is hourly; ts = ceiling of now to the next whole hour. */
+function nextFundingTs(now: number): number {
+  const HOUR = 3_600_000;
+  return Math.ceil(now / HOUR) * HOUR;
+}
+
 export class HyperliquidAdapter implements VenueAdapter {
   readonly venue = 'hyperliquid' as const;
 
   private ws: WsInstance | null = null;
   private symbols: readonly string[] = [];
   private tickHandlers: Array<(t: Tick) => void> = [];
+  private fundingHandlers: Array<(f: Funding) => void> = [];
+  private oiHandlers: Array<(o: OpenInterest) => void> = [];
   private pingTimer: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
   private stopped = false;
@@ -47,6 +68,14 @@ export class HyperliquidAdapter implements VenueAdapter {
 
   onTick(handler: (t: Tick) => void): void {
     this.tickHandlers.push(handler);
+  }
+
+  onFunding(handler: (f: Funding) => void): void {
+    this.fundingHandlers.push(handler);
+  }
+
+  onOpenInterest(handler: (o: OpenInterest) => void): void {
+    this.oiHandlers.push(handler);
   }
 
   async start(symbols: readonly string[]): Promise<void> {
@@ -79,12 +108,19 @@ export class HyperliquidAdapter implements VenueAdapter {
       this.reconnectAttempts = 0;
       console.log(`[hyperliquid] connected ${this.url}`);
       for (const coin of this.symbols) {
-        const msg = {
-          method: 'subscribe',
-          subscription: { type: 'trades', coin },
-        };
-        ws.send(JSON.stringify(msg));
-        console.log(`[hyperliquid] subscribed trades:${coin}`);
+        ws.send(
+          JSON.stringify({
+            method: 'subscribe',
+            subscription: { type: 'trades', coin },
+          }),
+        );
+        ws.send(
+          JSON.stringify({
+            method: 'subscribe',
+            subscription: { type: 'activeAssetCtx', coin },
+          }),
+        );
+        console.log(`[hyperliquid] subscribed trades+ctx:${coin}`);
       }
       // keepalive ping (1 = OPEN per WS spec)
       this.pingTimer = setInterval(() => {
@@ -101,6 +137,8 @@ export class HyperliquidAdapter implements VenueAdapter {
           for (const t of env.data as HlTrade[]) {
             this.emitTrade(t);
           }
+        } else if (env.channel === 'activeAssetCtx' && env.data) {
+          this.emitCtx(env.data as HlActiveAssetCtx);
         }
         // 'subscriptionResponse' and 'pong' channels are noise; ignore.
       } catch (err) {
@@ -160,6 +198,44 @@ export class HyperliquidAdapter implements VenueAdapter {
         h(tick);
       } catch (err) {
         console.error('[hyperliquid] tick handler threw', err);
+      }
+    }
+  }
+
+  private emitCtx(d: HlActiveAssetCtx): void {
+    const now = Date.now();
+    const symbol = d.coin;
+    const fund = Number(d.ctx?.funding);
+    if (Number.isFinite(fund)) {
+      const f: Funding = {
+        venue: 'hyperliquid',
+        symbol,
+        ts: now,
+        rate: fund,
+        nextTs: nextFundingTs(now),
+      };
+      for (const h of this.fundingHandlers) {
+        try {
+          h(f);
+        } catch (err) {
+          console.error('[hyperliquid] funding handler threw', err);
+        }
+      }
+    }
+    const oi = Number(d.ctx?.openInterest);
+    if (Number.isFinite(oi)) {
+      const o: OpenInterest = {
+        venue: 'hyperliquid',
+        symbol,
+        ts: now,
+        oi,
+      };
+      for (const h of this.oiHandlers) {
+        try {
+          h(o);
+        } catch (err) {
+          console.error('[hyperliquid] oi handler threw', err);
+        }
       }
     }
   }

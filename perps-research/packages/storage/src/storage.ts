@@ -5,7 +5,7 @@ import {
   type DuckDBConnection,
   type DuckDBValue,
 } from '@duckdb/node-api';
-import type { Bar, Tick, Timeframe } from '@perps/core';
+import type { Bar, Funding, Liquidation, OpenInterest, Tick, Timeframe } from '@perps/core';
 
 export interface CandleRow {
   ts: number;
@@ -14,6 +14,30 @@ export interface CandleRow {
   l: number;
   c: number;
   v: number;
+}
+
+export interface FundingRow {
+  venue: string;
+  symbol: string;
+  ts: number;
+  rate: number;
+  nextTs: number;
+}
+
+export interface OpenInterestRow {
+  venue: string;
+  symbol: string;
+  ts: number;
+  oi: number;
+}
+
+export interface LiquidationRow {
+  venue: string;
+  symbol: string;
+  ts: number;
+  side: 'long' | 'short';
+  size: number;
+  price: number;
 }
 
 const SCHEMA_SQL = `
@@ -38,6 +62,33 @@ CREATE TABLE IF NOT EXISTS bars_1m (
   v       DOUBLE  NOT NULL,
   PRIMARY KEY (venue, symbol, ts)
 );
+
+CREATE TABLE IF NOT EXISTS funding (
+  venue    VARCHAR NOT NULL,
+  symbol   VARCHAR NOT NULL,
+  ts       BIGINT  NOT NULL,
+  rate     DOUBLE  NOT NULL,
+  next_ts  BIGINT  NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_funding_vst ON funding(venue, symbol, ts);
+
+CREATE TABLE IF NOT EXISTS open_interest (
+  venue    VARCHAR NOT NULL,
+  symbol   VARCHAR NOT NULL,
+  ts       BIGINT  NOT NULL,
+  oi       DOUBLE  NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_oi_vst ON open_interest(venue, symbol, ts);
+
+CREATE TABLE IF NOT EXISTS liquidations (
+  venue    VARCHAR NOT NULL,
+  symbol   VARCHAR NOT NULL,
+  ts       BIGINT  NOT NULL,
+  side     VARCHAR NOT NULL,
+  size     DOUBLE  NOT NULL,
+  price    DOUBLE  NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_liq_vst ON liquidations(venue, symbol, ts);
 `;
 
 /**
@@ -50,6 +101,9 @@ export class Storage {
   private conn: DuckDBConnection | null = null;
   private tickBuf: Tick[] = [];
   private barBuf: Bar[] = [];
+  private fundingBuf: Funding[] = [];
+  private oiBuf: OpenInterest[] = [];
+  private liqBuf: Liquidation[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
   private readonly path: string;
   private readonly flushIntervalMs: number;
@@ -100,6 +154,18 @@ export class Storage {
     this.barBuf.push(bar);
   }
 
+  enqueueFunding(f: Funding): void {
+    this.fundingBuf.push(f);
+  }
+
+  enqueueOpenInterest(oi: OpenInterest): void {
+    this.oiBuf.push(oi);
+  }
+
+  enqueueLiquidation(l: Liquidation): void {
+    this.liqBuf.push(l);
+  }
+
   /** Read closed 1m bars for a (venue, symbol). Most-recent `limit` rows. */
   async getCandles(
     venue: string,
@@ -137,6 +203,68 @@ export class Storage {
   }
 
   /**
+   * Latest funding rate per (venue, symbol). One row per pair, the most
+   * recently observed rate. Used by /funding heatmap.
+   */
+  async getLatestFunding(): Promise<FundingRow[]> {
+    const conn = this.requireConn();
+    const reader = await conn.runAndReadAll(
+      `SELECT venue, symbol, ts, rate, next_ts
+       FROM funding
+       QUALIFY row_number() OVER (PARTITION BY venue, symbol ORDER BY ts DESC) = 1
+       ORDER BY rate DESC`,
+    );
+    return (reader.getRowObjects() as Array<Record<string, unknown>>).map((r) => ({
+      venue: String(r.venue),
+      symbol: String(r.symbol),
+      ts: Number(r.ts),
+      rate: Number(r.rate),
+      nextTs: Number(r.next_ts),
+    }));
+  }
+
+  /**
+   * Latest open interest per (venue, symbol).
+   */
+  async getLatestOpenInterest(): Promise<OpenInterestRow[]> {
+    const conn = this.requireConn();
+    const reader = await conn.runAndReadAll(
+      `SELECT venue, symbol, ts, oi
+       FROM open_interest
+       QUALIFY row_number() OVER (PARTITION BY venue, symbol ORDER BY ts DESC) = 1
+       ORDER BY oi DESC`,
+    );
+    return (reader.getRowObjects() as Array<Record<string, unknown>>).map((r) => ({
+      venue: String(r.venue),
+      symbol: String(r.symbol),
+      ts: Number(r.ts),
+      oi: Number(r.oi),
+    }));
+  }
+
+  /**
+   * Recent liquidations (cross-venue tape). Newest first, capped at `limit`.
+   */
+  async getRecentLiquidations(limit = 200): Promise<LiquidationRow[]> {
+    const conn = this.requireConn();
+    const reader = await conn.runAndReadAll(
+      `SELECT venue, symbol, ts, side, size, price
+       FROM liquidations
+       ORDER BY ts DESC
+       LIMIT ?`,
+      [limit],
+    );
+    return (reader.getRowObjects() as Array<Record<string, unknown>>).map((r) => ({
+      venue: String(r.venue),
+      symbol: String(r.symbol),
+      ts: Number(r.ts),
+      side: r.side === 'long' ? 'long' : 'short',
+      size: Number(r.size),
+      price: Number(r.price),
+    }));
+  }
+
+  /**
    * Open an additional connection for streaming reads (SSE poller). DuckDB
    * supports many concurrent reader connections against a single writer.
    */
@@ -147,19 +275,30 @@ export class Storage {
 
   private async flush(): Promise<void> {
     if (!this.conn) return;
-    if (this.tickBuf.length === 0 && this.barBuf.length === 0) return;
+    const total =
+      this.tickBuf.length +
+      this.barBuf.length +
+      this.fundingBuf.length +
+      this.oiBuf.length +
+      this.liqBuf.length;
+    if (total === 0) return;
 
     const ticks = this.tickBuf;
     const bars = this.barBuf;
+    const funding = this.fundingBuf;
+    const oi = this.oiBuf;
+    const liqs = this.liqBuf;
     this.tickBuf = [];
     this.barBuf = [];
+    this.fundingBuf = [];
+    this.oiBuf = [];
+    this.liqBuf = [];
 
-    if (ticks.length > 0) {
-      await this.insertTicks(ticks);
-    }
-    if (bars.length > 0) {
-      await this.upsertBars(bars);
-    }
+    if (ticks.length > 0) await this.insertTicks(ticks);
+    if (bars.length > 0) await this.upsertBars(bars);
+    if (funding.length > 0) await this.insertFunding(funding);
+    if (oi.length > 0) await this.insertOI(oi);
+    if (liqs.length > 0) await this.insertLiquidations(liqs);
   }
 
   private async insertTicks(ticks: Tick[]): Promise<void> {
@@ -196,6 +335,48 @@ export class Storage {
          l = LEAST(bars_1m.l, excluded.l),
          c = excluded.c,
          v = excluded.v`,
+      params,
+    );
+  }
+
+  private async insertFunding(rows: Funding[]): Promise<void> {
+    const conn = this.requireConn();
+    // Dedupe: only insert when (venue, symbol, ts) hasn't been seen.
+    // Phase 2: we accept some duplication if upstream republishes; drop with
+    // a window in queries instead of an EXISTS check per row.
+    const placeholders = rows.map(() => '(?,?,?,?,?)').join(',');
+    const params: DuckDBValue[] = [];
+    for (const r of rows) {
+      params.push(r.venue, r.symbol, BigInt(r.ts), r.rate, BigInt(r.nextTs));
+    }
+    await conn.run(
+      `INSERT INTO funding (venue, symbol, ts, rate, next_ts) VALUES ${placeholders}`,
+      params,
+    );
+  }
+
+  private async insertOI(rows: OpenInterest[]): Promise<void> {
+    const conn = this.requireConn();
+    const placeholders = rows.map(() => '(?,?,?,?)').join(',');
+    const params: DuckDBValue[] = [];
+    for (const r of rows) {
+      params.push(r.venue, r.symbol, BigInt(r.ts), r.oi);
+    }
+    await conn.run(
+      `INSERT INTO open_interest (venue, symbol, ts, oi) VALUES ${placeholders}`,
+      params,
+    );
+  }
+
+  private async insertLiquidations(rows: Liquidation[]): Promise<void> {
+    const conn = this.requireConn();
+    const placeholders = rows.map(() => '(?,?,?,?,?,?)').join(',');
+    const params: DuckDBValue[] = [];
+    for (const r of rows) {
+      params.push(r.venue, r.symbol, BigInt(r.ts), r.side, r.size, r.price);
+    }
+    await conn.run(
+      `INSERT INTO liquidations (venue, symbol, ts, side, size, price) VALUES ${placeholders}`,
       params,
     );
   }

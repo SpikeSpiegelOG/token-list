@@ -19,6 +19,7 @@ const nextConfig = {
     '@perps/core',
     '@perps/indicators',
     '@perps/storage',
+    '@perps/venue-binance',
     '@perps/venue-hyperliquid',
   ],
   reactStrictMode: true,
