@@ -114,6 +114,80 @@ def test_facilitator_aggregation() -> bool:
     return ok
 
 
+def test_solana_secondary_wired() -> bool:
+    """Solana Binance hot wallets are surfaced and the dispatcher hits them."""
+    from scanner import binance_secondary
+    ok = True
+    ok &= _ok("Solana hot wallets defined",
+              len(binance_secondary.SOLANA_HOTS) >= 1,
+              f"got {len(binance_secondary.SOLANA_HOTS)}")
+    ok &= _ok("scan_solana exists",
+              callable(getattr(binance_secondary, "scan_solana", None)))
+    ok &= _ok("score_secondary_solana exists",
+              callable(getattr(binance_secondary, "score_secondary_solana", None)))
+    return ok
+
+
+def test_facilitator_graph_builder(tmpdir: Path) -> bool:
+    """Build a graph for our synthetic facilitator and assert the shape
+    contains the expected nodes/edges.
+    """
+    from validation import fixtures
+
+    # Stage a facilitators.json that the dashboard reader will pick up
+    facs = [{
+        "wallet": fixtures.W_FACILITATOR,
+        "distinct_payers": 3,
+        "distinct_listings": ["PNUTX", "ACTX", "MEME4"],
+        "chains": ["ethereum"],
+        "payment_count": 3,
+        "total_usd_received": 300_000,
+        "payments": [
+            {"from_team": fixtures.W_TEAM_PNUT,  "to": fixtures.W_FACILITATOR,
+             "amount_usd": 100_000, "listing_symbol": "PNUTX", "chain": "ethereum",
+             "ts": fixtures.T0 + 28 * fixtures.DAY, "tx": "0xpay1", "symbol": "USDC"},
+            {"from_team": fixtures.W_TEAM_ACT,   "to": fixtures.W_FACILITATOR,
+             "amount_usd": 120_000, "listing_symbol": "ACTX",  "chain": "ethereum",
+             "ts": fixtures.T0 + 33 * fixtures.DAY, "tx": "0xpay2", "symbol": "USDC"},
+            {"from_team": fixtures.W_TEAM_MEME4, "to": fixtures.W_FACILITATOR,
+             "amount_usd": 80_000,  "listing_symbol": "MEME4", "chain": "ethereum",
+             "ts": fixtures.T0 + 43 * fixtures.DAY, "tx": "0xpay3", "symbol": "USDC"},
+        ],
+    }]
+    (tmpdir / "facilitators.json").write_text(json.dumps(facs))
+
+    import config as cfg
+    original = cfg.DATA_DIR
+    cfg.DATA_DIR = tmpdir
+    try:
+        from monitor import dashboard
+        import importlib
+        importlib.reload(dashboard)
+        graph = dashboard._build_facilitator_graph(fixtures.W_FACILITATOR)
+    finally:
+        cfg.DATA_DIR = original
+
+    ok = True
+    ok &= _ok("graph has center node",
+              graph.get("center") == fixtures.W_FACILITATOR)
+    node_ids = {n["id"] for n in graph.get("nodes", [])}
+    ok &= _ok("facilitator node present",
+              fixtures.W_FACILITATOR in node_ids)
+    expected_teams = {fixtures.W_TEAM_PNUT, fixtures.W_TEAM_ACT,
+                      fixtures.W_TEAM_MEME4}
+    ok &= _ok("all 3 paying team nodes present",
+              expected_teams <= node_ids,
+              f"missing={expected_teams - node_ids}")
+    # Should have 3 inbound edges (one per team, aggregated)
+    edge_count = sum(1 for e in graph.get("edges", [])
+                     if e["to"] == fixtures.W_FACILITATOR)
+    ok &= _ok("3 inbound edges (team→facilitator)",
+              edge_count == 3, f"got {edge_count}")
+    ok &= _ok("stats.distinct_payers == 3",
+              (graph.get("stats") or {}).get("distinct_payers") == 3)
+    return ok
+
+
 def test_tier_weighting() -> bool:
     """The convergence scoring weights tiers correctly."""
     from monitor.wallet_watcher import TIER_WEIGHT
@@ -243,15 +317,24 @@ def run(live: bool = False) -> int:
     results.append(test_tier_weighting())
     print()
 
+    print("[5] Solana Binance-secondary wiring")
+    results.append(test_solana_secondary_wired())
+    print()
+
+    print("[6] Facilitator graph builder")
+    with tempfile.TemporaryDirectory() as td:
+        results.append(test_facilitator_graph_builder(Path(td)))
+    print()
+
     if live:
-        print("[5] Live DEXScreener (no auth)")
+        print("[7] Live DEXScreener (no auth)")
         results.append(test_live_dexscreener())
         print()
-        print("[6] Live Binance announcement CMS (no auth)")
+        print("[8] Live Binance announcement CMS (no auth)")
         results.append(test_live_binance_announcements())
         print()
     else:
-        print("[5] Live tests — skipped (pass --live to enable)")
+        print("[7] Live tests — skipped (pass --live to enable)")
         print()
 
     passed = sum(results)

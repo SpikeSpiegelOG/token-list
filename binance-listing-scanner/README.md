@@ -167,6 +167,19 @@ still respond as expected — catches API-shape regressions early.
 Solana paths use Helius RPC + enhanced txn API. EVM paths use Etherscan V2
 multichain.
 
+## Facilitator graph
+
+The dashboard exposes an interactive node-link diagram for each known
+FACILITATOR wallet, showing:
+
+- Every memecoin team wallet that paid it (inbound, color-coded by listing)
+- Every wallet it has forwarded funds to (outbound, including any Binance
+  hot wallet deposits)
+
+Index page lists all facilitators at `/facilitators`. Click a wallet to
+open `/facilitator-graph/<addr>` rendered with vis.js (CDN, no build step).
+JSON also available at `/api/facilitator-graph/<addr>` for scripting.
+
 ## 3) Run the local monitor + dashboard
 
 ```bash

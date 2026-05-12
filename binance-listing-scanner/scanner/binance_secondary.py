@@ -36,12 +36,19 @@ sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 from monitor import db  # noqa: E402
 from monitor.wallet_watcher import BINANCE_HOTS  # noqa: E402
+from qualification import solana_helpers  # noqa: E402
 
 ETHERSCAN_V2 = "https://api.etherscan.io/v2/api"
 
 EVM_CHAINS = {
     "ethereum": 1, "binance-smart-chain": 56, "polygon-pos": 137,
     "base": 8453, "arbitrum-one": 42161, "optimistic-ethereum": 10,
+}
+
+# Solana Binance hot wallets — pulled out of BINANCE_HOTS by prefix
+SOLANA_HOTS = {
+    addr: label for addr, label in BINANCE_HOTS.items()
+    if not addr.startswith("0x")
 }
 
 DEX_ROUTERS = {
@@ -214,6 +221,164 @@ def score_secondary(chain: str, hot_addr: str, recipient: str,
     return score, detail
 
 
+def _solana_binance_outflows(hot_addr: str, lookback_days: int) -> list[dict]:
+    """Pull recent outbound transfers from a Solana Binance hot wallet."""
+    since = int(time.time()) - lookback_days * 86400
+    base = f"https://api.helius.xyz/v0/addresses/{hot_addr}/transactions"
+    out: list[dict] = []
+    before = None
+    pages = 0
+    while pages < 50:
+        params = {"api-key": config.HELIUS_API_KEY, "limit": 100,
+                  "type": "TRANSFER"}
+        if before:
+            params["before"] = before
+        r = requests.get(base, params=params, timeout=20)
+        if r.status_code != 200:
+            break
+        batch = r.json()
+        if not batch:
+            break
+        stop = False
+        for tx in batch:
+            ts = tx.get("timestamp", 0)
+            if ts < since:
+                stop = True
+                break
+            # Native SOL transfers
+            for nt in tx.get("nativeTransfers", []) or []:
+                if nt.get("fromUserAccount") != hot_addr:
+                    continue
+                recipient = nt.get("toUserAccount")
+                if not recipient or recipient in solana_helpers.SOL_EXCLUDE:
+                    continue
+                out.append({
+                    "recipient": recipient,
+                    "tx": tx.get("signature", ""),
+                    "ts": ts,
+                    "asset": "SOL",
+                })
+            # SPL token transfers (USDC/USDT/etc.)
+            for tt in tx.get("tokenTransfers", []) or []:
+                if tt.get("fromUserAccount") != hot_addr:
+                    continue
+                recipient = tt.get("toUserAccount")
+                if not recipient or recipient in solana_helpers.SOL_EXCLUDE:
+                    continue
+                out.append({
+                    "recipient": recipient,
+                    "tx": tx.get("signature", ""),
+                    "ts": ts,
+                    "asset": tt.get("mint", "")[:6] or "SPL",
+                })
+        before = batch[-1].get("signature") if batch else None
+        if stop or not before:
+            break
+        pages += 1
+        time.sleep(0.15)
+    return out
+
+
+def _solana_binance_withdrawal_count(wallet: str, hot_set: set,
+                                    lookback_days: int) -> int:
+    """Count distinct Binance withdrawals into `wallet` on Solana."""
+    since = int(time.time()) - lookback_days * 86400
+    base = f"https://api.helius.xyz/v0/addresses/{wallet}/transactions"
+    r = requests.get(base, params={
+        "api-key": config.HELIUS_API_KEY, "limit": 100, "type": "TRANSFER",
+    }, timeout=15)
+    if r.status_code != 200:
+        return 0
+    n = 0
+    for tx in r.json() or []:
+        if tx.get("timestamp", 0) < since:
+            break
+        for nt in tx.get("nativeTransfers", []) or []:
+            if nt.get("toUserAccount") == wallet \
+                    and nt.get("fromUserAccount") in hot_set:
+                n += 1
+                break
+        for tt in tx.get("tokenTransfers", []) or []:
+            if tt.get("toUserAccount") == wallet \
+                    and tt.get("fromUserAccount") in hot_set:
+                n += 1
+                break
+    return n
+
+
+def score_secondary_solana(hot_addr: str, recipient: str,
+                          withdraw_ts: int) -> tuple[float, dict]:
+    score = 0.0
+    detail: dict = {"chain": "solana", "hot_wallet": hot_addr}
+
+    age_days = solana_helpers.solana_wallet_age_days(recipient)
+    detail["age_days_at_withdrawal"] = age_days
+    if age_days < 30:
+        score += 0.4
+
+    first_swap = solana_helpers.solana_first_swap_after(recipient, withdraw_ts)
+    if first_swap:
+        dt_h = (first_swap["ts"] - withdraw_ts) / 3600
+        detail["time_to_first_swap_h"] = round(dt_h, 2)
+        detail["first_swap_token"] = first_swap["symbol"]
+        if dt_h <= SNIPER_WINDOW_HOURS:
+            score += 0.3
+        if not first_swap.get("is_blue_chip"):
+            score += 0.2
+
+    n_with = _solana_binance_withdrawal_count(
+        recipient, set(SOLANA_HOTS.keys()), RECURRING_WINDOW_DAYS
+    )
+    detail["binance_withdrawals_60d"] = n_with
+    if n_with >= RECURRING_THRESHOLD:
+        score += 0.2
+
+    if _is_in_prelisting_buyers(recipient):
+        score += 0.3
+        detail["historical_prelisting_buyer"] = True
+
+    return score, detail
+
+
+def scan_solana() -> int:
+    """Scan Solana Binance hot wallets for sniper-pattern recipients."""
+    if not config.HELIUS_API_KEY:
+        print("[solana] HELIUS_API_KEY not set, skipping")
+        return 0
+    seen: set[str] = set()
+    added = 0
+    for hot in SOLANA_HOTS:
+        try:
+            outflows = _solana_binance_outflows(hot, WITHDRAWAL_LOOKBACK_DAYS)
+        except Exception as e:
+            print(f"err pulling SOL outflows {hot[:10]}: {e}")
+            continue
+        print(f"[solana] {SOLANA_HOTS[hot]}: {len(outflows)} outflows")
+        for o in outflows:
+            r = o["recipient"]
+            if r in seen:
+                continue
+            seen.add(r)
+            try:
+                score, detail = score_secondary_solana(hot, r, o["ts"])
+            except Exception as e:
+                print(f"  err scoring {r[:10]}: {e}")
+                continue
+            if score < 0.6:
+                continue
+            with db.conn() as c:
+                c.execute(
+                    "INSERT OR REPLACE INTO insider_wallets"
+                    "(wallet, hit_count, chains, symbols, avg_lead_time_h, "
+                    " notes, tier, funding_source, confidence) "
+                    "VALUES (?, 0, 'solana', '', NULL, ?, 'BINANCE_2NDARY', ?, ?)",
+                    (r, json.dumps(detail), hot, round(score, 2)),
+                )
+            added += 1
+            time.sleep(0.15)
+    return added
+
+
 def scan(chain: str) -> int:
     """Scan one EVM chain's Binance hot wallets. Returns rows added."""
     chain_id = EVM_CHAINS[chain]
@@ -265,6 +430,11 @@ def main() -> None:
             total += scan(chain)
         except Exception as e:
             print(f"err on {chain}: {e}")
+    # Solana path uses Helius rather than Etherscan V2
+    try:
+        total += scan_solana()
+    except Exception as e:
+        print(f"err on solana: {e}")
     print(f"Added {total} BINANCE_2NDARY wallets total.")
 
 
