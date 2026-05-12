@@ -33,6 +33,7 @@ import sys, pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 from monitor import db  # noqa: E402
+from qualification import solana_helpers  # noqa: E402
 
 ETHERSCAN_V2 = "https://api.etherscan.io/v2/api"
 
@@ -74,64 +75,110 @@ def _evm_deployer(chain_id: int, token_addr: str) -> str | None:
     return None
 
 
-def _evm_largest_holders(chain_id: int, token_addr: str) -> list[str]:
-    """Pull early supply receivers — these are likely team/insider wallets
-    pre-launch.
+def _is_likely_pool(chain_id: int, candidate: str, token_addr: str) -> bool:
+    """A pool address receives the token from many distinct senders and is
+    typically created in the first hour of the token's life. Heuristic:
+    if >50% of the candidate's interactions are with this single token, it's
+    a pool, not a team wallet.
     """
     r = requests.get(ETHERSCAN_V2, params={
         "chainid": chain_id, "module": "account", "action": "tokentx",
-        "contractaddress": token_addr, "page": 1, "offset": 50, "sort": "asc",
+        "address": candidate, "page": 1, "offset": 100, "sort": "desc",
+        "apikey": config.ETHERSCAN_API_KEY,
+    }, timeout=15).json()
+    res = r.get("result")
+    if not isinstance(res, list) or len(res) < 10:
+        return False
+    same_token = sum(
+        1 for t in res if t.get("contractAddress", "").lower() == token_addr.lower()
+    )
+    return same_token / len(res) >= 0.5
+
+
+def _evm_largest_holders(chain_id: int, token_addr: str) -> list[str]:
+    """Pull early supply receivers — likely team/insider wallets pre-launch.
+    Filters out pool/LP contracts via behavioral heuristic.
+    """
+    r = requests.get(ETHERSCAN_V2, params={
+        "chainid": chain_id, "module": "account", "action": "tokentx",
+        "contractaddress": token_addr, "page": 1, "offset": 100, "sort": "asc",
         "apikey": config.ETHERSCAN_API_KEY,
     }, timeout=15).json()
     res = r.get("result")
     if not isinstance(res, list):
         return []
-    holders = []
-    seen = set()
-    for tx in res[:20]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for tx in res[:40]:
         to = tx.get("to", "").lower()
         if to and to not in seen and to not in EXCLUDE_RECIPIENTS:
             seen.add(to)
-            holders.append(to)
+            candidates.append(to)
+    # Filter out DEX pool addresses
+    holders = []
+    for c in candidates[:15]:  # cap the pool-check API spend
+        try:
+            if not _is_likely_pool(chain_id, c, token_addr):
+                holders.append(c)
+        except Exception:
+            holders.append(c)
+        time.sleep(0.1)
     return holders
 
 
 def _evm_stable_outflows(chain_id: int, wallet: str,
                         before_ts: int, window_days: int) -> list[dict]:
-    """Pull stable outflows (USDC/USDT/etc) from a wallet in the window."""
+    """Pull stable outflows (USDC/USDT/etc) from a wallet in the window.
+
+    Paginates Etherscan results in 1000-row pages until we reach the
+    `since` cutoff or run out of results.
+    """
     since = before_ts - window_days * 86400
-    r = requests.get(ETHERSCAN_V2, params={
-        "chainid": chain_id, "module": "account", "action": "tokentx",
-        "address": wallet, "page": 1, "offset": 1000, "sort": "desc",
-        "apikey": config.ETHERSCAN_API_KEY,
-    }, timeout=20).json()
-    out = []
-    for tx in (r.get("result") or []):
-        if not isinstance(tx, dict):
-            continue
-        ts = int(tx.get("timeStamp", 0))
-        if ts > before_ts or ts < since:
-            continue
-        if tx.get("from", "").lower() != wallet.lower():
-            continue
-        sym = tx.get("tokenSymbol", "")
-        if sym not in STABLE_SYMBOLS:
-            continue
-        decimals = int(tx.get("tokenDecimal", 6) or 6)
-        usd_amount = int(tx["value"]) / (10 ** decimals)
-        if usd_amount < MIN_TRANCHE_USD:
-            continue
-        to = tx.get("to", "").lower()
-        if to in EXCLUDE_RECIPIENTS:
-            continue
-        out.append({
-            "to": to,
-            "amount_usd": usd_amount,
-            "symbol": sym,
-            "ts": ts,
-            "tx": tx["hash"],
-            "from_team": wallet.lower(),
-        })
+    out: list[dict] = []
+    page = 1
+    while page <= 10:  # cap to ~10k txns per wallet
+        r = requests.get(ETHERSCAN_V2, params={
+            "chainid": chain_id, "module": "account", "action": "tokentx",
+            "address": wallet, "page": page, "offset": 1000, "sort": "desc",
+            "apikey": config.ETHERSCAN_API_KEY,
+        }, timeout=20).json()
+        res = r.get("result")
+        if not isinstance(res, list) or not res:
+            break
+        stop = False
+        for tx in res:
+            if not isinstance(tx, dict):
+                continue
+            ts = int(tx.get("timeStamp", 0))
+            if ts < since:
+                stop = True
+                break
+            if ts > before_ts:
+                continue
+            if tx.get("from", "").lower() != wallet.lower():
+                continue
+            sym = tx.get("tokenSymbol", "")
+            if sym not in STABLE_SYMBOLS:
+                continue
+            decimals = int(tx.get("tokenDecimal", 6) or 6)
+            usd_amount = int(tx["value"]) / (10 ** decimals)
+            if usd_amount < MIN_TRANCHE_USD:
+                continue
+            to = tx.get("to", "").lower()
+            if to in EXCLUDE_RECIPIENTS:
+                continue
+            out.append({
+                "to": to,
+                "amount_usd": usd_amount,
+                "symbol": sym,
+                "ts": ts,
+                "tx": tx["hash"],
+                "from_team": wallet.lower(),
+            })
+        if stop or len(res) < 1000:
+            break
+        page += 1
+        time.sleep(0.25)
     return out
 
 
@@ -145,20 +192,39 @@ def scan(listings: list[dict]) -> dict:
         sym = listing["symbol"]
         anno_ts = listing["announced_at"]
         for chain, addr in (listing.get("platforms") or {}).items():
-            if not addr or chain not in EVM_CHAINS:
+            if not addr:
                 continue
-            chain_id = EVM_CHAINS[chain]
-            team_wallets = set()
-            deployer = _evm_deployer(chain_id, addr)
-            if deployer:
-                team_wallets.add(deployer)
-            team_wallets.update(_evm_largest_holders(chain_id, addr))
+            team_wallets: set[str] = set()
+            # Resolve team wallets per chain
+            if chain == "solana":
+                try:
+                    dep = solana_helpers.solana_deployer(addr)
+                    if dep:
+                        team_wallets.add(dep)
+                    team_wallets.update(solana_helpers.solana_team_holders(addr))
+                except Exception as e:
+                    print(f"    err sol team {sym}: {e}")
+                    continue
+            elif chain in EVM_CHAINS:
+                chain_id = EVM_CHAINS[chain]
+                dep = _evm_deployer(chain_id, addr)
+                if dep:
+                    team_wallets.add(dep)
+                team_wallets.update(_evm_largest_holders(chain_id, addr))
+            else:
+                continue
+
             print(f"  {sym} ({chain}): {len(team_wallets)} team-candidate wallets")
             for tw in team_wallets:
                 try:
-                    outs = _evm_stable_outflows(
-                        chain_id, tw, anno_ts, PAYMENT_WINDOW_DAYS
-                    )
+                    if chain == "solana":
+                        outs = solana_helpers.solana_stable_outflows(
+                            tw, anno_ts, PAYMENT_WINDOW_DAYS
+                        )
+                    else:
+                        outs = _evm_stable_outflows(
+                            EVM_CHAINS[chain], tw, anno_ts, PAYMENT_WINDOW_DAYS
+                        )
                 except Exception as e:
                     print(f"    err pulling outflows {tw[:10]}: {e}")
                     continue
@@ -187,11 +253,13 @@ def main() -> None:
         if len(distinct_payers) < MIN_DISTINCT_PAYERS:
             continue
         distinct_listings = {p["listing_symbol"] for p in payments}
+        chains_seen = sorted({p["chain"] for p in payments})
         total_usd = sum(p["amount_usd"] for p in payments)
         facilitators.append({
             "wallet": recipient,
             "distinct_payers": len(distinct_payers),
             "distinct_listings": sorted(distinct_listings),
+            "chains": chains_seen,
             "payment_count": len(payments),
             "total_usd_received": round(total_usd, 2),
             "payments": payments,
@@ -214,8 +282,8 @@ def main() -> None:
                 "INSERT OR REPLACE INTO insider_wallets"
                 "(wallet, hit_count, chains, symbols, avg_lead_time_h, "
                 " notes, tier, confidence) "
-                "VALUES (?, ?, 'evm', ?, NULL, ?, 'FACILITATOR', ?)",
-                (f["wallet"], f["distinct_payers"],
+                "VALUES (?, ?, ?, ?, NULL, ?, 'FACILITATOR', ?)",
+                (f["wallet"], f["distinct_payers"], ",".join(f["chains"]),
                  ",".join(f["distinct_listings"]), notes, confidence),
             )
     print(f"Loaded {len(facilitators)} FACILITATOR wallets to DB")

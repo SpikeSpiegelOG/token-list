@@ -22,10 +22,14 @@ POLL_INTERVAL = 3.0  # seconds
 def poll_once() -> int:
     r = requests.get(LISTING_API, params={
         "type": 1, "catalogId": 48, "pageNo": 1, "pageSize": 10,
-    }, timeout=10)
+    }, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
     r.raise_for_status()
     new = 0
-    for art in r.json().get("data", {}).get("articles", []):
+    data = r.json().get("data") or {}
+    articles = data.get("articles") or (
+        (data.get("catalogs") or [{}])[0].get("articles", [])
+    )
+    for art in articles:
         code = art.get("code")
         if not code:
             continue

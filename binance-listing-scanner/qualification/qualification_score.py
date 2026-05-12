@@ -88,21 +88,17 @@ def score_token(token_addr: str, chain: str, symbol: str = "",
     out["median_buyer_strength"] = median_buyer_strength
     out["score_insider"] = round(insider_pts, 1)
 
-    # 4. Payment lineage (EVM only — Solana paths require Helius-based module)
-    if chain != "solana":
-        try:
-            p = payment_lineage.check_token(token_addr, chain)
-            out["payment"] = p
-            # Normalize: payment score of 1.5+ caps at 25 pts
-            out["score_payment"] = round(
-                min(p.get("score", 0) / 1.5 * WEIGHTS["payment"],
-                    WEIGHTS["payment"]), 1
-            )
-        except Exception as e:
-            out["payment"] = {"error": str(e)}
-            out["score_payment"] = 0
-    else:
-        out["payment"] = {"note": "EVM-only check; Solana lineage not run"}
+    # 4. Payment lineage — now supports EVM + Solana
+    try:
+        p = payment_lineage.check_token(token_addr, chain)
+        out["payment"] = p
+        # Normalize: payment score of 1.5+ caps at 25 pts
+        out["score_payment"] = round(
+            min(p.get("score", 0) / 1.5 * WEIGHTS["payment"],
+                WEIGHTS["payment"]), 1
+        )
+    except Exception as e:
+        out["payment"] = {"error": str(e)}
         out["score_payment"] = 0
 
     out["total"] = round(

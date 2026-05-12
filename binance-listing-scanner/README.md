@@ -125,6 +125,48 @@ it suggests insider/facilitator activity has begun, which is when PRIMARY
 clusters typically start front-running. Use it as a confirmation layer on
 top of an INSIDER_FLOW signal, not a standalone trigger.
 
+### Single-token qualification CLI
+
+For ad-hoc analysis of one address:
+
+```bash
+python -m qualification.qualify 2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump
+python -m qualification.qualify 0x6982508145454ce325ddbe47a25d4ec3d2311933 --twitter pepecoineth
+python -m qualification.qualify <addr> --chain binance-smart-chain --json
+```
+
+Chain auto-detected from address shape. Insider count auto-pulled from the
+local DB if available. Prints a human-readable report with per-component
+scores, OR `--json` for machine-readable output.
+
+### Validating the pipeline
+
+```bash
+python -m validation.validate_pipeline           # offline / mock
+python -m validation.validate_pipeline --live    # also hit no-auth APIs
+```
+
+Runs the cluster + facilitator logic against synthetic fixtures (5 fake
+listings with 3 known-insider wallets and 1 known-facilitator wallet)
+and checks for correct identification + correct noise rejection.
+With `--live`, also validates DEXScreener and Binance CMS endpoints
+still respond as expected — catches API-shape regressions early.
+
+## Multi-chain support
+
+| Chain | Listings + buyers | Insider expansion | Binance-secondary | Facilitator | Payment lineage |
+|---|---|---|---|---|---|
+| Ethereum         | ✅ | ✅ | ✅ | ✅ | ✅ |
+| BSC              | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Base             | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Arbitrum         | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Polygon          | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Optimism         | ✅ | ✅ | ❌ | ✅ | ✅ |
+| **Solana**       | ✅ | partial | ✅ | ✅ | ✅ |
+
+Solana paths use Helius RPC + enhanced txn API. EVM paths use Etherscan V2
+multichain.
+
 ## 3) Run the local monitor + dashboard
 
 ```bash

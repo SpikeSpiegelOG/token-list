@@ -31,21 +31,32 @@ from qualification.facilitator_finder import (  # noqa: E402
     _evm_deployer, _evm_largest_holders, _evm_stable_outflows,
     EVM_CHAINS, STABLE_SYMBOLS,
 )
+from qualification import solana_helpers  # noqa: E402
 
 LOOKBACK_DAYS = 90
 
 
 def check_token(token_addr: str, chain: str) -> dict[str, Any]:
-    chain_id = EVM_CHAINS.get(chain)
-    if not chain_id:
-        return {"error": f"chain {chain} not supported here"}
+    """Multi-chain dispatcher: EVM via Etherscan V2, Solana via Helius."""
+    if chain != "solana" and chain not in EVM_CHAINS:
+        return {"error": f"chain {chain} not supported"}
 
     # 1. Identify team wallets
     team: set[str] = set()
-    dep = _evm_deployer(chain_id, token_addr)
-    if dep:
-        team.add(dep)
-    team.update(_evm_largest_holders(chain_id, token_addr))
+    if chain == "solana":
+        try:
+            dep = solana_helpers.solana_deployer(token_addr)
+            if dep:
+                team.add(dep)
+            team.update(solana_helpers.solana_team_holders(token_addr))
+        except Exception as e:
+            return {"error": f"solana team resolution failed: {e}"}
+    else:
+        chain_id = EVM_CHAINS[chain]
+        dep = _evm_deployer(chain_id, token_addr)
+        if dep:
+            team.add(dep)
+        team.update(_evm_largest_holders(chain_id, token_addr))
 
     # 2. Pull recent insider_wallets WHERE tier in (PRIMARY, EXPANDED,
     #    BINANCE_2NDARY, FACILITATOR) — these are our "flagged contacts"
@@ -63,7 +74,11 @@ def check_token(token_addr: str, chain: str) -> dict[str, Any]:
     matches: list[dict[str, Any]] = []
     for tw in team:
         try:
-            outs = _evm_stable_outflows(chain_id, tw, now, LOOKBACK_DAYS)
+            if chain == "solana":
+                outs = solana_helpers.solana_stable_outflows(tw, now, LOOKBACK_DAYS)
+            else:
+                outs = _evm_stable_outflows(EVM_CHAINS[chain], tw, now,
+                                            LOOKBACK_DAYS)
         except Exception as e:
             print(f"err team={tw[:10]}: {e}")
             continue

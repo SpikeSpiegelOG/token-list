@@ -79,6 +79,7 @@ def fetch_recent_listings(n: int = 40) -> list[dict]:
     """
     out: list[dict] = []
     page = 1
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
     while len(out) < n:
         params = {
             "type": 1,
@@ -86,9 +87,13 @@ def fetch_recent_listings(n: int = 40) -> list[dict]:
             "pageNo": page,
             "pageSize": 50,
         }
-        r = requests.get(LISTING_API, params=params, timeout=15)
+        r = requests.get(LISTING_API, params=params, headers=headers, timeout=15)
         r.raise_for_status()
-        articles = r.json().get("data", {}).get("articles", [])
+        data = r.json().get("data") or {}
+        # New (2026) response shape nests articles under data.catalogs[0].articles
+        articles = data.get("articles") or (
+            (data.get("catalogs") or [{}])[0].get("articles", [])
+        )
         if not articles:
             break
         out.extend(articles)

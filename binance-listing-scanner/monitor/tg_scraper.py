@@ -21,7 +21,13 @@ import json
 import re
 import time
 
-from telethon import TelegramClient, events
+try:
+    from telethon import TelegramClient, events
+    _TELETHON_AVAILABLE = True
+except ImportError:
+    TelegramClient = None  # type: ignore[assignment]
+    events = None  # type: ignore[assignment]
+    _TELETHON_AVAILABLE = False
 
 import sys, pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parent.parent))
@@ -80,6 +86,9 @@ def _persist(channel: str, msg_id: int, sender: str, text: str, ts: int) -> None
 
 
 async def main() -> None:
+    if not _TELETHON_AVAILABLE:
+        print("telethon not installed. Run: pip install telethon")
+        return
     if not (config.TG_API_ID and config.TG_API_HASH and config.TG_CHANNELS):
         print("Set TG_API_ID, TG_API_HASH and TG_CHANNELS in .env. Aborting.")
         return
