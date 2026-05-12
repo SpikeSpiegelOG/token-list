@@ -52,7 +52,8 @@ python -m scanner.build_watchlist
 # writes:
 #   data/listings.json
 #   data/buyers/<SYMBOL>.json
-#   data/insider_wallets.json   <-- the cluster
+#   data/insider_wallets.json   <-- the PRIMARY cluster
+#   data/scanner.db             <-- all tiers + funding edges
 ```
 
 What it does:
@@ -61,7 +62,23 @@ What it does:
 |---|---|---|
 | 1 | `scanner/binance_listings.py` | Pulls last `LOOKBACK_LISTINGS` Binance memecoin listings from the CMS API. Resolves token contracts via CoinGecko. |
 | 2 | `scanner/prelisting_buyers.py` | For each listing, queries every wallet that received the token in the `PRE_LISTING_WINDOW_HOURS` before the announcement (Etherscan V2 for EVM, Helius for Solana). Filters out CEX hot wallets. |
-| 3 | `scanner/cluster.py` | Cross-joins those buyer lists. Wallets appearing in `>= MIN_LISTINGS_FOR_INSIDER` listings are flagged as insider cluster, ranked by hit count and average lead time. |
+| 3 | `scanner/cluster.py` | Cross-joins those buyer lists. Wallets appearing in `>= MIN_LISTINGS_FOR_INSIDER` listings are flagged as **PRIMARY** insider cluster, ranked by hit count and average lead time. |
+| 4 | `monitor/load_insiders.py` | Pushes PRIMARY wallets to SQLite so the expansion steps can build on them. |
+| 5 | `scanner/cluster_expansion.py` | **EXPANDED tier.** For each PRIMARY wallet, walks funding lineage: finds who funded the seed (parent), what wallets the seed funded (child), and wallets the same parent funded near-simultaneously (siblings). Confidence-scored, ≥0.7 written. Edges persisted to `funding_edges` table for graph visualization. |
+| 6 | `scanner/binance_secondary.py` | **BINANCE_2NDARY tier.** Pulls last 30 days of outflows from every known Binance hot wallet. For each recipient, scores: wallet-age, time-to-first-DEX-swap, repeated-withdrawal count, first-swap-token (memecoin vs blue chip), historical pre-listing buyer overlap. Score ≥0.6 written. |
+
+### Tier model
+
+| Tier | What | Convergence weight |
+|---|---|---|
+| **PRIMARY** | Appears in ≥`MIN_LISTINGS_FOR_INSIDER` historical Binance memecoin pre-listing windows. | 1.0× |
+| **EXPANDED** | Linked to a PRIMARY via funding lineage (parent, child, or sibling co-funded within 1 hour). | 0.6× |
+| **BINANCE_2NDARY** | Funded directly from a Binance hot wallet AND exhibits post-withdrawal sniper behavior (fresh wallet, <24h to first DEX swap, recurring Binance withdrawals, memecoin first trade). | 0.5× |
+
+An ENTRY alert fires when the **weighted score** for a token in the
+convergence window reaches **≥ 2.0** — i.e., 2 PRIMARYs, or 1 PRIMARY +
+2 EXPANDEDs, or 4 BINANCE_2NDARYs, etc. This is much more sensitive than
+plain "≥2 wallets" while still requiring real signal.
 
 Tweak `LOOKBACK_LISTINGS`, `PRE_LISTING_WINDOW_HOURS`, `MIN_LISTINGS_FOR_INSIDER`
 in `.env`.
@@ -136,8 +153,10 @@ binance-listing-scanner/
 ├── scanner/
 │   ├── binance_listings.py        # 1) Fetch listings + resolve contracts
 │   ├── prelisting_buyers.py       # 2) Find pre-announcement buyers
-│   ├── cluster.py                 # 3) Cluster wallets across listings
-│   └── build_watchlist.py         # entry point: runs 1→2→3
+│   ├── cluster.py                 # 3) PRIMARY cluster (cross-listing wallets)
+│   ├── cluster_expansion.py       # 5) EXPANDED tier (funding-lineage graph)
+│   ├── binance_secondary.py       # 6) BINANCE_2NDARY tier (hot-wallet outflows)
+│   └── build_watchlist.py         # entry point: runs 1→2→3→4→5→6
 ├── candidates/
 │   ├── score_tokens.py            # what insiders are buying NOW
 │   └── current_candidates.md      # framework + seed wallets + categories

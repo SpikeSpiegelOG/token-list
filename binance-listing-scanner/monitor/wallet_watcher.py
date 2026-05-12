@@ -130,32 +130,60 @@ def process_solana_tx(wallet: str, tx: dict) -> None:
             )
 
 
+TIER_WEIGHT = {"PRIMARY": 1.0, "EXPANDED": 0.6, "BINANCE_2NDARY": 0.5}
+
+
 def detect_convergence() -> None:
-    """If 2+ insider wallets bought the same token in the last 6h → ENTRY alert."""
+    """Tier-weighted convergence: PRIMARY hits count fully, EXPANDED 0.6×,
+    BINANCE_2NDARY 0.5×. ENTRY fires when weighted score >= 2.0 (≈ 2 primaries
+    or 3 expandeds or 4 secondaries) in the window. Records wallet tiers in
+    the payload for inspection.
+    """
     cutoff = int(time.time()) - CONVERGENCE_WINDOW
     with db.conn() as c:
         rows = c.execute(
-            "SELECT token_addr, token_symbol, COUNT(DISTINCT wallet) AS w, "
-            "       GROUP_CONCAT(DISTINCT wallet) AS wallets "
-            "FROM wallet_events "
-            "WHERE direction='in' AND ts >= ? "
-            "GROUP BY token_addr HAVING w >= 2",
+            "SELECT we.token_addr, we.token_symbol, we.wallet, iw.tier "
+            "FROM wallet_events we "
+            "JOIN insider_wallets iw ON iw.wallet = we.wallet "
+            "WHERE we.direction='in' AND we.ts >= ?",
             (cutoff,),
         ).fetchall()
+
+    by_token: dict[str, dict] = defaultdict(
+        lambda: {"symbol": "", "wallets": [], "score": 0.0, "tiers": []}
+    )
     for r in rows:
-        # Dedupe alert for same subject within window
+        entry = by_token[r["token_addr"]]
+        entry["symbol"] = r["token_symbol"]
+        if r["wallet"] in [w for w, _ in zip(entry["wallets"], entry["tiers"])]:
+            continue  # dedupe per-wallet per-token in window
+        entry["wallets"].append(r["wallet"])
+        entry["tiers"].append(r["tier"] or "PRIMARY")
+        entry["score"] += TIER_WEIGHT.get(r["tier"] or "PRIMARY", 0.5)
+
+    for token_addr, e in by_token.items():
+        if e["score"] < 2.0:
+            continue
         with db.conn() as c:
             existing = c.execute(
                 "SELECT id FROM alerts WHERE kind='cluster_buy' "
                 "AND subject=? AND ts >= ?",
-                (r["token_symbol"], cutoff),
+                (e["symbol"], cutoff),
             ).fetchone()
         if existing:
             continue
+        tier_breakdown = {t: e["tiers"].count(t) for t in set(e["tiers"])}
         db.add_alert(
-            severity="ENTRY", kind="cluster_buy", subject=r["token_symbol"],
-            message=f"{r['w']} insider wallets bought {r['token_symbol']} in last 6h",
-            payload=json.dumps({"wallets": r["wallets"].split(",")}),
+            severity="ENTRY", kind="cluster_buy", subject=e["symbol"],
+            message=(f"{e['symbol']}: weighted score {e['score']:.1f} from "
+                     f"{len(e['wallets'])} wallets — "
+                     f"{', '.join(f'{n}× {t}' for t, n in tier_breakdown.items())}"),
+            payload=json.dumps({
+                "token_addr": token_addr,
+                "score": e["score"],
+                "wallets": e["wallets"],
+                "tiers": e["tiers"],
+            }),
         )
 
 

@@ -19,8 +19,33 @@ CREATE TABLE IF NOT EXISTS insider_wallets (
     symbols TEXT NOT NULL,
     avg_lead_time_h REAL,
     notes TEXT,
+    -- Tier breakdown:
+    --   PRIMARY    : appears in >= MIN_LISTINGS_FOR_INSIDER historical listings
+    --   EXPANDED   : connected to PRIMARY via funding lineage (sibling/parent/child)
+    --   BINANCE_2NDARY: funded directly from a Binance hot wallet AND shows
+    --                   sniper behavior (fresh wallet + immediate DEX swap)
+    tier TEXT DEFAULT 'PRIMARY',
+    parent_wallet TEXT,                 -- if EXPANDED, the seed wallet it links to
+    funding_source TEXT,                -- if BINANCE_2NDARY, the originating hot wallet
+    confidence REAL,                    -- 0.0–1.0 score
     added_at INTEGER DEFAULT (strftime('%s', 'now'))
 );
+CREATE INDEX IF NOT EXISTS idx_insider_tier ON insider_wallets(tier);
+
+-- Funding lineage edges for graph walks
+CREATE TABLE IF NOT EXISTS funding_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_wallet TEXT NOT NULL,
+    to_wallet TEXT NOT NULL,
+    chain TEXT NOT NULL,
+    asset TEXT,                         -- native / USDC / USDT / etc.
+    amount TEXT,
+    tx TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    UNIQUE(tx, from_wallet, to_wallet)
+);
+CREATE INDEX IF NOT EXISTS idx_funding_to ON funding_edges(to_wallet);
+CREATE INDEX IF NOT EXISTS idx_funding_from ON funding_edges(from_wallet);
 
 CREATE TABLE IF NOT EXISTS wallet_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

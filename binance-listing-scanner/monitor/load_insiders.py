@@ -21,8 +21,9 @@ def main() -> None:
         for r in rows:
             c.execute(
                 "INSERT OR REPLACE INTO insider_wallets"
-                "(wallet, hit_count, chains, symbols, avg_lead_time_h, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(wallet, hit_count, chains, symbols, avg_lead_time_h, "
+                " notes, tier, confidence) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'PRIMARY', 1.0)",
                 (r["wallet"], r["hit_count"], ",".join(r["chains"]),
                  ",".join(r["symbols"]), r.get("avg_lead_time_h"), ""),
             )

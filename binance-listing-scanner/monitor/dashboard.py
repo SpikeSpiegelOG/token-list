@@ -39,6 +39,9 @@ PAGE = """
   .ENTRY { color: #4f4; font-weight: bold; }
   .WATCH { color: #fc4; }
   .INFO { color: #6cf; }
+  .PRIMARY { color: #4f4; }
+  .EXPANDED { color: #fc4; }
+  .BINANCE_2NDARY { color: #f9f; }
   .small { color: #666; font-size: 11px; }
   a { color: #6cf; text-decoration: none; }
 </style></head><body>
@@ -51,9 +54,15 @@ PAGE = """
 {alerts}
 </table>
 
-<h2>Insider wallets ({n_wallets})</h2>
+<h2>Insider wallets — tier breakdown ({n_wallets} total: {n_primary} P / {n_expanded} E / {n_secondary} B2)</h2>
+<p class="small">
+  <b style="color:#4f4">PRIMARY</b>  — appears in ≥{min_listings} historical pre-listing windows<br>
+  <b style="color:#fc4">EXPANDED</b> — linked to a PRIMARY via funding lineage (parent/child/sibling)<br>
+  <b style="color:#f9f">BINANCE_2NDARY</b> — wallet funded from a Binance hot wallet + post-withdrawal sniper behavior
+</p>
 <table>
-<tr><th>wallet</th><th>hits</th><th>chains</th><th>avg lead (h)</th><th>symbols</th></tr>
+<tr><th>tier</th><th>wallet</th><th>hits / conf</th><th>chains</th>
+    <th>avg lead (h)</th><th>parent / source</th><th>notes</th></tr>
 {wallets}
 </table>
 
@@ -91,8 +100,16 @@ def home() -> str:
         alerts = c.execute(
             "SELECT * FROM alerts ORDER BY ts DESC LIMIT 100"
         ).fetchall()
+        # Order so PRIMARY appears first, then EXPANDED, then BINANCE_2NDARY
         wallets = c.execute(
-            "SELECT * FROM insider_wallets ORDER BY hit_count DESC LIMIT 50"
+            "SELECT * FROM insider_wallets "
+            "ORDER BY CASE tier WHEN 'PRIMARY' THEN 0 "
+            "                   WHEN 'EXPANDED' THEN 1 "
+            "                   WHEN 'BINANCE_2NDARY' THEN 2 ELSE 3 END, "
+            "         hit_count DESC, confidence DESC LIMIT 100"
+        ).fetchall()
+        counts = c.execute(
+            "SELECT tier, COUNT(*) AS n FROM insider_wallets GROUP BY tier"
         ).fetchall()
         anns = c.execute(
             "SELECT * FROM binance_announcements ORDER BY release_date DESC LIMIT 20"
@@ -101,6 +118,7 @@ def home() -> str:
             "SELECT * FROM tg_messages WHERE contains_token_address=1 "
             "ORDER BY ts DESC LIMIT 30"
         ).fetchall()
+    tier_counts = {r["tier"]: r["n"] for r in counts}
     alerts_html = "".join(
         f"<tr><td class='small'>{_fmt_ts(a['ts'])}</td>"
         f"<td class='{a['severity']}'>{a['severity']}</td>"
@@ -108,12 +126,21 @@ def home() -> str:
         f"<td>{a['message']}</td></tr>"
         for a in alerts
     ) or "<tr><td colspan=5 class='small'>(no alerts yet)</td></tr>"
+    def _hitconf(w):
+        if w["tier"] == "PRIMARY":
+            return f"{w['hit_count']} hits"
+        return f"conf {w['confidence']:.2f}" if w["confidence"] else "—"
+
     wallets_html = "".join(
-        f"<tr><td>{w['wallet']}</td><td>{w['hit_count']}</td>"
-        f"<td>{w['chains']}</td><td>{w['avg_lead_time_h'] or ''}</td>"
-        f"<td class='small'>{w['symbols']}</td></tr>"
+        f"<tr><td class='{w['tier']}'><b>{w['tier']}</b></td>"
+        f"<td>{w['wallet']}</td>"
+        f"<td>{_hitconf(w)}</td>"
+        f"<td>{w['chains']}</td>"
+        f"<td>{w['avg_lead_time_h'] or ''}</td>"
+        f"<td class='small'>{(w['parent_wallet'] or w['funding_source'] or '')[:18]}</td>"
+        f"<td class='small'>{(w['symbols'] or w['notes'] or '')[:80]}</td></tr>"
         for w in wallets
-    ) or "<tr><td colspan=5 class='small'>(none — run scanner)</td></tr>"
+    ) or "<tr><td colspan=7 class='small'>(none — run scanner)</td></tr>"
     ann_html = "".join(
         f"<tr><td class='small'>{_fmt_ts(a['release_date'])}</td>"
         f"<td><a href='{a['url']}' target='_blank'>{a['title']}</a></td></tr>"
@@ -130,6 +157,10 @@ def home() -> str:
     return PAGE.format(
         db_path=config.DB_PATH,
         n_wallets=len(wallets),
+        n_primary=tier_counts.get("PRIMARY", 0),
+        n_expanded=tier_counts.get("EXPANDED", 0),
+        n_secondary=tier_counts.get("BINANCE_2NDARY", 0),
+        min_listings=config.MIN_LISTINGS_FOR_INSIDER,
         alerts=alerts_html,
         wallets=wallets_html,
         announcements=ann_html,
@@ -161,5 +192,35 @@ def api_wallet(wallet: str):
         rows = c.execute(
             "SELECT * FROM wallet_events WHERE wallet=? ORDER BY ts DESC LIMIT 200",
             (wallet,),
+        ).fetchall()
+    return JSONResponse([dict(r) for r in rows])
+
+
+@app.get("/api/insider-wallets/{tier}")
+def api_wallets_by_tier(tier: str):
+    """tier ∈ {PRIMARY, EXPANDED, BINANCE_2NDARY, all}"""
+    with db.conn() as c:
+        if tier.lower() == "all":
+            rows = c.execute(
+                "SELECT * FROM insider_wallets ORDER BY tier, confidence DESC"
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM insider_wallets WHERE tier=? "
+                "ORDER BY confidence DESC, hit_count DESC",
+                (tier.upper(),),
+            ).fetchall()
+    return JSONResponse([dict(r) for r in rows])
+
+
+@app.get("/api/funding-edges/{wallet}")
+def api_edges(wallet: str):
+    """Return funding lineage edges touching `wallet` (in or out)."""
+    with db.conn() as c:
+        rows = c.execute(
+            "SELECT * FROM funding_edges "
+            "WHERE from_wallet=? OR to_wallet=? "
+            "ORDER BY ts DESC LIMIT 200",
+            (wallet, wallet),
         ).fetchall()
     return JSONResponse([dict(r) for r in rows])
