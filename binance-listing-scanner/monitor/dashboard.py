@@ -42,6 +42,12 @@ PAGE = """
   .PRIMARY { color: #4f4; }
   .EXPANDED { color: #fc4; }
   .BINANCE_2NDARY { color: #f9f; }
+  .FACILITATOR { color: #f55; font-weight: bold; }
+  .STRONG { color: #4f4; font-weight: bold; }
+  .MODERATE { color: #fc4; }
+  .WEAK { color: #888; }
+  .bar { background:#222; height:10px; border-radius:4px; overflow:hidden; }
+  .bar > div { background:#6cf; height:100%; }
   .small { color: #666; font-size: 11px; }
   a { color: #6cf; text-decoration: none; }
 </style></head><body>
@@ -54,9 +60,21 @@ PAGE = """
 {alerts}
 </table>
 
-<h2>Insider wallets — tier breakdown ({n_wallets} total: {n_primary} P / {n_expanded} E / {n_secondary} B2)</h2>
+<h2>Qualified candidates — Binance-readiness score</h2>
+<p class="small">
+  Combined 0–100 score across <b>market</b> (volume/liquidity/holders),
+  <b>social</b> (X mindshare/followers), <b>insider</b> (cluster accumulation),
+  <b>payment</b> (team→facilitator transfers).
+</p>
+<table>
+<tr><th>symbol</th><th>chain</th><th>total</th><th>M</th><th>S</th><th>I</th><th>P</th><th>verdict</th></tr>
+{qualified}
+</table>
+
+<h2>Insider wallets — tier breakdown ({n_wallets} total: {n_primary} P / {n_facilitator} F / {n_expanded} E / {n_secondary} B2)</h2>
 <p class="small">
   <b style="color:#4f4">PRIMARY</b>  — appears in ≥{min_listings} historical pre-listing windows<br>
+  <b style="color:#f55">FACILITATOR</b> — receives recurring $50k+ stablecoin tranches from many distinct memecoin team wallets ("listing fixer" archetype, per the ACT1 story)<br>
   <b style="color:#fc4">EXPANDED</b> — linked to a PRIMARY via funding lineage (parent/child/sibling)<br>
   <b style="color:#f9f">BINANCE_2NDARY</b> — wallet funded from a Binance hot wallet + post-withdrawal sniper behavior
 </p>
@@ -119,6 +137,16 @@ def home() -> str:
             "ORDER BY ts DESC LIMIT 30"
         ).fetchall()
     tier_counts = {r["tier"]: r["n"] for r in counts}
+
+    # Load qualified candidates from JSON (written by qualification_score.py)
+    qualified = []
+    qpath = config.DATA_DIR / "qualified_candidates.json"
+    if qpath.exists():
+        try:
+            import json as _json
+            qualified = _json.loads(qpath.read_text())[:25]
+        except Exception:
+            qualified = []
     alerts_html = "".join(
         f"<tr><td class='small'>{_fmt_ts(a['ts'])}</td>"
         f"<td class='{a['severity']}'>{a['severity']}</td>"
@@ -154,14 +182,29 @@ def home() -> str:
         for t in tgs
     ) or "<tr><td colspan=4 class='small'>(no tg leaks captured)</td></tr>"
 
+    qualified_html = "".join(
+        f"<tr><td><b>{q.get('symbol') or q['token_addr'][:8]}</b></td>"
+        f"<td>{q['chain']}</td>"
+        f"<td><div class='bar'><div style='width:{q['total']}%'></div></div>"
+        f"<span class='small'>{q['total']}</span></td>"
+        f"<td class='small'>{q['score_market']}</td>"
+        f"<td class='small'>{q['score_social']}</td>"
+        f"<td class='small'>{q['score_insider']}</td>"
+        f"<td class='small'>{q['score_payment']}</td>"
+        f"<td class='{q['verdict']}'><b>{q['verdict']}</b></td></tr>"
+        for q in qualified
+    ) or "<tr><td colspan=8 class='small'>(none — run qualification.qualification_score)</td></tr>"
+
     return PAGE.format(
         db_path=config.DB_PATH,
         n_wallets=len(wallets),
         n_primary=tier_counts.get("PRIMARY", 0),
         n_expanded=tier_counts.get("EXPANDED", 0),
         n_secondary=tier_counts.get("BINANCE_2NDARY", 0),
+        n_facilitator=tier_counts.get("FACILITATOR", 0),
         min_listings=config.MIN_LISTINGS_FOR_INSIDER,
         alerts=alerts_html,
+        qualified=qualified_html,
         wallets=wallets_html,
         announcements=ann_html,
         tg=tg_html,
@@ -224,3 +267,22 @@ def api_edges(wallet: str):
             (wallet, wallet),
         ).fetchall()
     return JSONResponse([dict(r) for r in rows])
+
+
+@app.get("/api/qualified-candidates")
+def api_qualified():
+    import json as _json
+    qpath = config.DATA_DIR / "qualified_candidates.json"
+    if not qpath.exists():
+        return JSONResponse([])
+    return JSONResponse(_json.loads(qpath.read_text()))
+
+
+@app.get("/api/facilitators")
+def api_facilitators():
+    """Return the FACILITATOR-tier wallets with full payment history."""
+    import json as _json
+    fpath = config.DATA_DIR / "facilitators.json"
+    if not fpath.exists():
+        return JSONResponse([])
+    return JSONResponse(_json.loads(fpath.read_text()))

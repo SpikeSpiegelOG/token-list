@@ -72,6 +72,7 @@ What it does:
 | Tier | What | Convergence weight |
 |---|---|---|
 | **PRIMARY** | Appears in ≥`MIN_LISTINGS_FOR_INSIDER` historical Binance memecoin pre-listing windows. | 1.0× |
+| **FACILITATOR** | Receives recurring $50k+ stablecoin tranches from many distinct memecoin team wallets ("listing fixer" archetype). Built by scanning every listed token's team-wallet outflows backward and finding recipients that appear across multiple unrelated tokens. | 0.9× |
 | **EXPANDED** | Linked to a PRIMARY via funding lineage (parent, child, or sibling co-funded within 1 hour). | 0.6× |
 | **BINANCE_2NDARY** | Funded directly from a Binance hot wallet AND exhibits post-withdrawal sniper behavior (fresh wallet, <24h to first DEX swap, recurring Binance withdrawals, memecoin first trade). | 0.5× |
 
@@ -96,6 +97,33 @@ as candidates. Output is sorted by insider count and median wallet strength.
 
 See `candidates/current_candidates.md` for the full convergence/scoring
 framework, validation gates, and sizing notes.
+
+## 2b) Score candidates against the full Binance-listing playbook
+
+Modeled on the public ACT1 listing story — a memecoin that allegedly cleared
+four criteria to get on Binance: enough X activity, enough volume, enough
+holders, and a backchannel payment.
+
+```bash
+python -m qualification.qualification_score
+# writes data/qualified_candidates.json
+```
+
+For each candidate token from step 2, scores out of 100:
+
+| Component | What it checks | Source |
+|---|---|---|
+| **Market (25 pts)** | 24h DEX volume ≥ $8M, liquidity ≥ $500k, holders ≥ 10k, txns ≥ 5k | DEXScreener / Solscan / Etherscan |
+| **Social (25 pts)** | Galaxy Score ≥ 60, social volume ≥ 5k, followers ≥ 20k | LunarCrush (optional) + Nitter profile scrape |
+| **Insider flow (25 pts)** | How many distinct insider wallets are converging, weighted by their hit-strength | `candidates/score_tokens.py` output |
+| **Payment lineage (25 pts)** | Has the team paid a known FACILITATOR or BINANCE_2NDARY wallet $50k+ in stables in the last 90 days? | `qualification/payment_lineage.py` |
+
+Score ≥70 = STRONG, 45–69 = MODERATE, <45 = WEAK.
+
+**Important:** a HIGH PAYMENT_LINEAGE score on its own is not a buy signal —
+it suggests insider/facilitator activity has begun, which is when PRIMARY
+clusters typically start front-running. Use it as a confirmation layer on
+top of an INSIDER_FLOW signal, not a standalone trigger.
 
 ## 3) Run the local monitor + dashboard
 
@@ -160,6 +188,12 @@ binance-listing-scanner/
 ├── candidates/
 │   ├── score_tokens.py            # what insiders are buying NOW
 │   └── current_candidates.md      # framework + seed wallets + categories
+├── qualification/
+│   ├── market_metrics.py          # 24h vol / liquidity / holders / txns
+│   ├── social_score.py            # LunarCrush + Nitter profile scrape
+│   ├── facilitator_finder.py      # discovers FACILITATOR wallets
+│   ├── payment_lineage.py         # checks team→facilitator payments
+│   └── qualification_score.py     # aggregates all 4 into 0–100 score
 └── monitor/
     ├── db.py                      # SQLite schema
     ├── load_insiders.py           # JSON → DB

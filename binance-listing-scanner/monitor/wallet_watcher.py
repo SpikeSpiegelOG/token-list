@@ -130,7 +130,8 @@ def process_solana_tx(wallet: str, tx: dict) -> None:
             )
 
 
-TIER_WEIGHT = {"PRIMARY": 1.0, "EXPANDED": 0.6, "BINANCE_2NDARY": 0.5}
+TIER_WEIGHT = {"PRIMARY": 1.0, "FACILITATOR": 0.9,
+               "EXPANDED": 0.6, "BINANCE_2NDARY": 0.5}
 
 
 def detect_convergence() -> None:
